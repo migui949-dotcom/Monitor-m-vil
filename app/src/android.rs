@@ -53,6 +53,41 @@ mod imp {
         ok
     }
 
+    /// Cortafuegos propio: 1 = puesto, 0 = apagado
+    pub fn firewall_state() -> i32 {
+        let mut v = 0;
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { v = env.call_method(act, "firewallState", "()I", &[])?.i()?; Ok(()) });
+        }
+        v
+    }
+
+    pub fn set_firewall(on: bool) {
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { env.call_method(act, "setFirewall", "(Z)V", &[JValue::Bool(on as u8)])?; Ok(()) });
+        }
+    }
+
+    pub fn battery_exempt() -> bool {
+        let mut ok = false;
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { ok = env.call_method(act, "batteryExempt", "()Z", &[])?.z()?; Ok(()) });
+        }
+        ok
+    }
+
+    pub fn ask_battery() {
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { env.call_method(act, "askBattery", "()V", &[])?; Ok(()) });
+        }
+    }
+
+    pub fn open_autostart() {
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { env.call_method(act, "openAutostart", "()V", &[])?; Ok(()) });
+        }
+    }
+
     const SCREEN_BRIGHT_WAKE_LOCK: i32 = 0x0000_000a;
     const ON_AFTER_RELEASE: i32 = 0x2000_0000;
 
@@ -93,4 +128,5 @@ mod imp {
 }
 
 #[cfg(target_os = "android")]
-pub use imp::{ask_media_permissions, has_media_permissions, info, init, keep_screen_on, set_brightness, set_dim};
+pub use imp::{ask_battery, ask_media_permissions, battery_exempt, firewall_state, has_media_permissions, info, init, keep_screen_on,
+              open_autostart, set_brightness, set_dim, set_firewall};

@@ -96,6 +96,9 @@ pub fn run(link: Arc<Link>, rx: Receiver<Vec<u8>>, video: Arc<Video>) -> io::Res
                 // FramebufferUpdate
                 skip(&mut r, 1)?;
                 let rects = u16_(&mut r)?;
+                // Se pide la siguiente ya: el servidor puede preparar la próxima imagen mientras esta
+                // llega y se decodifica (ahorra un viaje de ida y vuelta por fotograma).
+                update_request(&link, true, w, h)?;
                 for _ in 0..rects {
                     let (_x, _y, rw, rh) = (u16_(&mut r)?, u16_(&mut r)?, u16_(&mut r)?, u16_(&mut r)?);
                     let enc = u32_(&mut r)? as i32;
@@ -117,7 +120,6 @@ pub fn run(link: Arc<Link>, rx: Receiver<Vec<u8>>, video: Arc<Video>) -> io::Res
                         other => return Err(io::Error::other(format!("codificación no soportada: {other}"))),
                     }
                 }
-                update_request(&link, true, w, h)?;
             }
             1 => {
                 // SetColourMapEntries

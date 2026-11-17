@@ -4,7 +4,13 @@ import android.Manifest;
 import android.app.NativeActivity;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ComponentName;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.net.VpnService;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Environment;
@@ -30,6 +36,83 @@ public class MainActivity extends NativeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         immersive();
+        // si el cortafuegos estaba puesto (y Android ya dio permiso de VPN), se vuelve a poner
+        if (prefs().getBoolean("cortafuegos", false) && VpnService.prepare(this) == null) startFirewallService();
+    }
+
+    // ───────────── Cortafuegos propio (Cortafuegos.java) ─────────────
+
+    private static final int REQ_VPN = 7;
+
+    private SharedPreferences prefs() { return getSharedPreferences("pantalla", MODE_PRIVATE); }
+
+    private void startFirewallService() {
+        startForegroundService(new Intent(this, Cortafuegos.class));
+    }
+
+    /** 0 = apagado, 1 = puesto. */
+    public int firewallState() {
+        return Cortafuegos.running ? 1 : 0;
+    }
+
+    /** Pone o quita el cortafuegos (la primera vez Android pide permiso para la "VPN"). */
+    public void setFirewall(final boolean on) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                prefs().edit().putBoolean("cortafuegos", on).apply();
+                if (!on) {
+                    startService(new Intent(MainActivity.this, Cortafuegos.class).setAction(Cortafuegos.STOP));
+                    return;
+                }
+                Intent ask = VpnService.prepare(MainActivity.this);
+                if (ask != null) startActivityForResult(ask, REQ_VPN);
+                else startFirewallService();
+            }
+        });
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req == REQ_VPN) {
+            if (res == RESULT_OK) startFirewallService();
+            else prefs().edit().putBoolean("cortafuegos", false).apply();
+        }
+    }
+
+    /** true si Android no va a cerrar la app para ahorrar batería. */
+    public boolean batteryExempt() {
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        return pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    /** Pide quitar la app del ahorro de batería y abre el "inicio automático" de MIUI. */
+    public void askBattery() {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                try {
+                    if (!batteryExempt())
+                        startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + getPackageName())));
+                    else openAutostart();
+                } catch (Exception e) { openAutostart(); }
+            }
+        });
+    }
+
+    /** Ajuste de MIUI "Inicio automático" (si no existe, los ajustes de la app). */
+    public void openAutostart() {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                try {
+                    startActivity(new Intent().setComponent(new ComponentName("com.miui.securitycenter",
+                            "com.miui.permcenter.autostart.AutoStartManagementActivity")));
+                } catch (Exception e) {
+                    startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:" + getPackageName())));
+                }
+            }
+        });
     }
 
     @Override

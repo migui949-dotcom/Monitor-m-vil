@@ -52,10 +52,19 @@ struct App {
     #[cfg(target_os = "android")]
     android: Option<winit::platform::android::activity::AndroidApp>,
     keep_on: bool,
+    data_dir: std::path::PathBuf,
+    /// pantalla de permisos (la primera vez, o desde el botón "Permisos")
+    setup: bool,
+    /// estado de permisos/cortafuegos leído por JNI (se refresca cada segundo)
+    perms: Perms,
 }
+
+#[derive(Default, Clone, Copy)]
+struct Perms { media: bool, firewall: bool, battery: bool, at: Option<std::time::Instant> }
 
 impl App {
     fn new(data_dir: std::path::PathBuf, debug_dir: Option<std::path::PathBuf>) -> App {
+        let setup = !data_dir.join("permisos-vistos").exists();
         let state = Arc::new(Mutex::new(net::Shared {
             hosts: HashMap::new(),
             status: Status::Idle,
@@ -67,7 +76,7 @@ impl App {
             disconnect: false,
         }));
         net::discovery(state.clone());
-        let ident = Arc::new(Identity::load(data_dir));
+        let ident = Arc::new(Identity::load(data_dir.clone()));
         // Depuración: si existe files/depuracion.json (solo lo puede escribir adb) con
         // {"conectar": "127.0.0.1:47901"}, se conecta sola a esa instancia de pruebas de movild.
         if let Some(dir) = debug_dir {
@@ -92,7 +101,78 @@ impl App {
             #[cfg(target_os = "android")]
             android: None,
             keep_on: false,
+            data_dir, setup, perms: Perms::default(),
         }
+    }
+
+    /// Estado de permisos y cortafuegos (JNI, como mucho una vez por segundo)
+    fn perms(&mut self) -> Perms {
+        let stale = self.perms.at.map(|t| t.elapsed() > Duration::from_secs(1)).unwrap_or(true);
+        if stale {
+            self.perms = Perms {
+                media: android::has_media_permissions(),
+                firewall: android::firewall_state() == 1,
+                battery: android::battery_exempt(),
+                at: Some(std::time::Instant::now()),
+            };
+        }
+        self.perms
+    }
+
+    /// Pantalla de permisos: cámara/micro, cortafuegos propio y que Android no cierre la app
+    fn setup_ui(&mut self, ui: &mut egui::Ui) {
+        let p = self.perms();
+        ui.ctx().request_repaint_after(Duration::from_millis(500));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(36.0)).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(big("Antes de empezar", 34.0, theme::FG));
+                ui.label(big("Toca cada botón y acepta lo que pregunte Android", 17.0, theme::MUTED));
+                ui.add_space(22.0);
+            });
+            let row = |ui: &mut egui::Ui, ok: bool, title: &str, desc: &str, action: &str| -> bool {
+                let mut clicked = false;
+                egui::Frame::new().fill(theme::SURFACE).corner_radius(18.0).inner_margin(16.0).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(big(if ok { "\u{F012C}" } else { "\u{F0130}" }, 30.0, if ok { theme::GREEN } else { theme::MUTED }));
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.label(big(title, 21.0, theme::FG));
+                            ui.label(big(desc, 15.0, theme::MUTED));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (t, c) = if ok { ("Listo", theme::SURFACE) } else { (action, theme::BLUE) };
+                            let b = egui::Button::new(big(t, 18.0, if ok { theme::GREEN } else { theme::BG })).fill(c)
+                                .corner_radius(14.0).min_size(egui::vec2(170.0, 52.0));
+                            if ui.add(b).clicked() { clicked = true; }
+                        });
+                    });
+                });
+                ui.add_space(12.0);
+                clicked
+            };
+            if row(ui, p.media, "Cámara y micrófono", "Para usar el móvil como webcam y micro del ordenador", "Permitir") && !p.media {
+                android::ask_media_permissions();
+            }
+            if row(ui, p.firewall, "Bloquear internet",
+                   "Ninguna app sale a internet; Pantalla solo habla con los equipos de casa (sustituye a NetGuard)", "Activar") {
+                android::set_firewall(!p.firewall);
+            }
+            if row(ui, p.battery, "Que Android no cierre la app",
+                   "Sin ahorro de batería para Pantalla. En MIUI activa también \"Inicio automático\"", "Abrir") {
+                if p.battery { android::open_autostart() } else { android::ask_battery() }
+            }
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                let b = egui::Button::new(big("Continuar", 22.0, theme::BG)).fill(theme::GREEN)
+                    .corner_radius(18.0).min_size(egui::vec2(280.0, 64.0));
+                if ui.add(b).clicked() {
+                    let _ = std::fs::write(self.data_dir.join("permisos-vistos"), b"1");
+                    self.setup = false;
+                }
+            });
+        });
+        self.perms.at = None;   // tras tocar algo, releer pronto
     }
 
     /// Mantener la pantalla encendida mientras haya sesión
@@ -385,6 +465,8 @@ impl eframe::App for App {
                 return;
             }
         }
+        if self.setup && !connected { self.setup_ui(ui); return; }
+        let perms = self.perms();
         hosts.sort_by(|a, b| b.cable.cmp(&a.cable).then(a.name.cmp(&b.name)));
         let my_fp = net::fingerprint(&self.ident.public);
 
@@ -449,6 +531,19 @@ impl eframe::App for App {
                     });
 
                     ui.add_space(30.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space((ui.available_width() - 2.0 * 300.0 - 16.0).max(0.0) / 2.0);
+                        let (t, c) = if perms.firewall { ("\u{F0483}  Internet bloqueado", theme::GREEN) }
+                                     else { ("\u{F0484}  Internet abierto", theme::YELLOW) };
+                        let b = egui::Button::new(big(t, 17.0, c)).fill(theme::SURFACE).corner_radius(14.0)
+                            .min_size(egui::vec2(300.0, 48.0));
+                        if ui.add(b).clicked() { android::set_firewall(!perms.firewall); self.perms.at = None; }
+                        ui.add_space(16.0);
+                        let b = egui::Button::new(big("\u{F0493}  Permisos", 17.0, theme::FG)).fill(theme::SURFACE)
+                            .corner_radius(14.0).min_size(egui::vec2(300.0, 48.0));
+                        if ui.add(b).clicked() { self.setup = true; }
+                    });
+                    ui.add_space(14.0);
                     ui.label(big(format!("{} · huella {my_fp}", self.device), 15.0, theme::BLUE));
                 });
             });

@@ -31,7 +31,7 @@ cp target/aarch64-linux-android/release/libmovil.so $OUT/apk/lib/arm64-v8a/
 cp $NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so $OUT/apk/lib/arm64-v8a/ 2>/dev/null || true
 # Capa Java mínima (MainActivity: pantalla inmersiva, permisos, pantalla encendida)
 mkdir -p $OUT/classes $OUT/dex
-javac -source 8 -target 8 -nowarn -Xlint:-options -cp $PLAT -d $OUT/classes $(find java -name '*.java')
+javac -encoding UTF-8 -source 8 -target 8 -nowarn -Xlint:-options -cp $PLAT -d $OUT/classes $(find java -name '*.java')
 $BT/d8 --release --min-api 29 --lib $PLAT --output $OUT/dex $(find $OUT/classes -name '*.class')
 $BT/aapt2 link -o $OUT/base.apk --manifest AndroidManifest.xml -I $PLAT
 python3 - "$OUT" <<'PY'

@@ -25,6 +25,8 @@ pub struct Host {
     pub id: String,
     pub name: String,
     pub os: String,
+    /// "linux" | "windows" (pantalla-host); vacío con movild antiguo
+    pub platform: String,
     pub key: Vec<u8>,
     pub addr: SocketAddr,
     pub cable: bool,
@@ -137,6 +139,7 @@ fn parse_info(v: &Value, addr: SocketAddr, cable: bool) -> Option<Host> {
         id: v["id"].as_str()?.to_string(),
         name: v["name"].as_str()?.to_string(),
         os: v["os"].as_str().unwrap_or("").to_string(),
+        platform: v["platform"].as_str().unwrap_or("").to_string(),
         key: hex_decode(v["key"].as_str()?),
         addr,
         cable,

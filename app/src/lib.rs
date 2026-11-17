@@ -45,6 +45,8 @@ struct App {
     touch: Touch,
     /// menú de la app (tres dedos)
     menu: bool,
+    /// dedo que está pulsando el botón del menú
+    btn_touch: Option<u64>,
     standby: standby::Standby,
     standby_was: bool,
     #[cfg(target_os = "android")]
@@ -86,7 +88,7 @@ impl App {
         }
         App {
             state, ident, device: net::device_name(),
-            renderer: Arc::new(Mutex::new(None)), touch: Touch::default(), menu: false, standby: standby::Standby::new(), standby_was: false,
+            renderer: Arc::new(Mutex::new(None)), touch: Touch::default(), menu: false, btn_touch: None, standby: standby::Standby::new(), standby_was: false,
             #[cfg(target_os = "android")]
             android: None,
             keep_on: false,
@@ -148,20 +150,37 @@ impl App {
             let y = ((p.y - rect.min.y) / scale).clamp(0.0, (h - 1) as f32);
             (x as u16, y as u16)
         };
+        // Botón siempre visible (abajo a la derecha) que abre el menú con "Desconectar":
+        // los toques que empiezan en él no llegan al escritorio.
+        let btn = egui::Rect::from_center_size(full.right_bottom() - egui::vec2(40.0, 40.0), egui::vec2(56.0, 56.0));
+        let p = ui.painter();
+        p.circle_filled(btn.center(), 26.0, egui::Color32::from_black_alpha(if self.menu { 200 } else { 110 }));
+        p.text(btn.center(), egui::Align2::CENTER_CENTER, "\u{F0425}", egui::FontId::proportional(26.0),
+               egui::Color32::from_white_alpha(170));
         let events = ui.input(|i| i.events.clone());
         for ev in events {
             if let egui::Event::Touch { id, phase, pos, .. } = ev {
+                if phase == egui::TouchPhase::Start && btn.contains(pos) { self.btn_touch = Some(id.0); }
+                if self.btn_touch == Some(id.0) {
+                    if matches!(phase, egui::TouchPhase::End | egui::TouchPhase::Cancel) {
+                        self.btn_touch = None;
+                        if phase == egui::TouchPhase::End && btn.expand(20.0).contains(pos) { self.menu = !self.menu; }
+                    }
+                    continue;
+                }
                 let (x, y) = to_remote(pos);
                 if let Some(action) = self.touch.event(id.0, phase, pos, (x, y)) {
                     match action {
                         Gesture::Menu => self.menu = !self.menu,
+                        // con el menú abierto los toques son para el menú, no para el escritorio
+                        _ if self.menu => {}
                         g => send_gesture(&link, g),
                     }
                 }
             }
         }
         // mantener pulsado sin mover → clic derecho
-        if let Some(g) = self.touch.tick() { send_gesture(&link, g); }
+        if let Some(g) = self.touch.tick() { if !self.menu { send_gesture(&link, g); } }
         if self.menu { self.menu_ui(ui, &link); }
         ui.ctx().request_repaint();
     }
@@ -417,7 +436,9 @@ impl eframe::App for App {
                         for h in &hosts {
                             let via = if h.cable { "Por cable" } else { "Por wifi" };
                             let extra = if h.busy { " · ocupado" } else { "" };
-                            let text = big(format!("{}\n{} · {via}{extra}", h.name, h.os), 24.0, theme::FG);
+                            // icono del sistema (Nerd Font): Windows / Linux
+                            let icon = match h.platform.as_str() { "windows" => "\u{F17A} ", "linux" => "\u{F17C} ", _ => "" };
+                            let text = big(format!("{icon}{}\n{} · {via}{extra}", h.name, h.os), 24.0, theme::FG);
                             let btn = egui::Button::new(text).fill(theme::SURFACE).corner_radius(22.0)
                                 .min_size(egui::vec2(w, 150.0));
                             if ui.add_enabled(!busy_ui, btn).clicked() {

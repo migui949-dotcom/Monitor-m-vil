@@ -329,7 +329,7 @@ impl App {
             .show(ui.ctx(), |ui| {
                 egui::Frame::new().fill(theme::SURFACE).corner_radius(24.0).inner_margin(28.0).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(big("Escritorio", 26.0, theme::FG));
+                        ui.label(big("Escritorio V2", 26.0, theme::FG));
                         ui.add_space(14.0);
                         let b = |t: &str, c: egui::Color32| egui::Button::new(big(t, 20.0, theme::BG)).fill(c)
                             .corner_radius(16.0).min_size(egui::vec2(280.0, 60.0));

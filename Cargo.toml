@@ -3,6 +3,8 @@ name = "pantalla-host"
 version = "0.1.0"
 edition = "2021"
 description = "Servicio del ordenador para la app Pantalla del móvil (un solo binario)"
+license-file = "LICENSE"
+repository = "https://github.com/migui949-dotcom/Monitor-m-vil"
 
 [dependencies]
 base64 = "0.22"

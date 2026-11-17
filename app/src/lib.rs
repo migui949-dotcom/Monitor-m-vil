@@ -155,11 +155,11 @@ impl App {
                 android::ask_media_permissions();
             }
             if row(ui, p.firewall, "Bloquear internet",
-                   "Ninguna app sale a internet; Pantalla solo habla con los equipos de casa (sustituye a NetGuard)", "Activar") {
+                   "Ninguna app sale a internet; Escritorio solo habla con los equipos de casa (sustituye a NetGuard)", "Activar") {
                 android::set_firewall(!p.firewall);
             }
             if row(ui, p.battery, "Que Android no cierre la app",
-                   "Sin ahorro de batería para Pantalla. En MIUI activa también \"Inicio automático\"", "Abrir") {
+                   "Sin ahorro de batería para Escritorio. En MIUI activa también \"Inicio automático\"", "Abrir") {
                 if p.battery { android::open_autostart() } else { android::ask_battery() }
             }
             ui.add_space(8.0);
@@ -277,7 +277,7 @@ impl App {
             .show(ui.ctx(), |ui| {
                 egui::Frame::new().fill(theme::SURFACE).corner_radius(24.0).inner_margin(28.0).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(big("Pantalla", 26.0, theme::FG));
+                        ui.label(big("Escritorio", 26.0, theme::FG));
                         ui.add_space(14.0);
                         let b = |t: &str, c: egui::Color32| egui::Button::new(big(t, 20.0, theme::BG)).fill(c)
                             .corner_radius(16.0).min_size(egui::vec2(280.0, 60.0));

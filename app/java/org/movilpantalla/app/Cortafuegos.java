@@ -10,7 +10,7 @@ import android.os.ParcelFileDescriptor;
 
 /**
  * Cortafuegos propio (sustituye a NetGuard): una "VPN" local que se queda con TODO el tráfico de
- * las demás apps y lo tira, sin mandarlo a ningún sitio. La app Pantalla queda fuera de la VPN
+ * las demás apps y lo tira, sin mandarlo a ningún sitio. La app Escritorio queda fuera de la VPN
  * (addDisallowedApplication), así que ella sí llega a los equipos de casa por el wifi.
  * No hay ningún servidor: los paquetes nunca salen del móvil.
  */
@@ -30,7 +30,7 @@ public class Cortafuegos extends VpnService {
         if (tun == null) {
             try {
                 Builder b = new Builder()
-                        .setSession("Pantalla: internet bloqueado")
+                        .setSession("Escritorio: internet bloqueado")
                         .addAddress("10.111.222.1", 32)
                         .addRoute("0.0.0.0", 0)
                         .addAddress("fd6d:6f76:696c::1", 128)
@@ -55,7 +55,7 @@ public class Cortafuegos extends VpnService {
         return new Notification.Builder(this, "cortafuegos")
                 .setSmallIcon(android.R.drawable.ic_lock_lock)
                 .setContentTitle("Internet bloqueado")
-                .setContentText("Solo Pantalla puede usar el wifi, y solo con los equipos de casa")
+                .setContentText("Solo Escritorio puede usar el wifi, y solo con los equipos de casa")
                 .setContentIntent(open)
                 .setOngoing(true)
                 .build();

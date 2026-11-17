@@ -33,7 +33,9 @@ cp $NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-andr
 mkdir -p $OUT/classes $OUT/dex
 javac -encoding UTF-8 -source 8 -target 8 -nowarn -Xlint:-options -cp $PLAT -d $OUT/classes $(find java -name '*.java')
 $BT/d8 --release --min-api 29 --lib $PLAT --output $OUT/dex $(find $OUT/classes -name '*.class')
-$BT/aapt2 link -o $OUT/base.apk --manifest AndroidManifest.xml -I $PLAT
+# recursos: solo el icono adaptativo (vectorial, generado con tools/icono.py)
+$BT/aapt2 compile --dir res -o $OUT/res.zip
+$BT/aapt2 link -o $OUT/base.apk --manifest AndroidManifest.xml -I $PLAT -R $OUT/res.zip --auto-add-overlay
 python3 - "$OUT" <<'PY'
 import sys, os, zipfile
 out = sys.argv[1]

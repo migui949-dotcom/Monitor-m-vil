@@ -55,7 +55,11 @@ fn main() {
         let c = buf[..n].to_vec();
         wf(s, &c);
     };
-    send(&mut s, &mut t, 0, br#"{"t":"hello","device":"Prueba","want":["screen"]}"#);
+    // PRUEBA_DEVICE / PRUEBA_WANT (p. ej. "screen,audio") para simular varios móviles distintos
+    let device = std::env::var("PRUEBA_DEVICE").unwrap_or_else(|_| "Prueba".into());
+    let want: Vec<String> = std::env::var("PRUEBA_WANT").unwrap_or_else(|_| "screen".into()).split(',').map(|w| format!("\"{w}\"")).collect();
+    let hello = format!(r#"{{"t":"hello","device":"{device}","want":[{}]}}"#, want.join(","));
+    send(&mut s, &mut t, 0, hello.as_bytes());
 
     let mut dec = Decoder::new().unwrap();
     let mut rfb: Vec<u8> = vec![];

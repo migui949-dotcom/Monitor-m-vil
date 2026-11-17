@@ -1,6 +1,8 @@
 //! `pantalla-host preparar-sistema` (como administrador; `instalar` lo lanza con pkexec o sudo):
 //! lo único que necesita root, para que todo funcione nada más instalar:
 //!  · webcam virtual "Camara del movil" (/dev/video42, v4l2loopback) — Meet, Discord, OBS…
+//!  · permiso para crear webcams al vuelo (/dev/v4l2loopback, regla udev "uaccess"): una
+//!    "Cámara de <móvil>" por cada móvil más que se conecte
 //!  · abrir los puertos 47800/udp y 47801/tcp si hay cortafuegos (firewalld o ufw) — conexión por wifi
 
 use std::process::{Command, Stdio};
@@ -21,7 +23,24 @@ fn has(cmd: &str) -> bool {
 
 /// ¿Falta algo que necesite administrador? (para no pedir la contraseña si ya está todo)
 pub fn needs_root() -> bool {
-    !std::path::Path::new("/dev/video42").exists() || firewall_closed()
+    !std::path::Path::new("/dev/video42").exists() || firewall_closed() || !ctl_writable()
+}
+
+const UDEV_RULE: &str = "/etc/udev/rules.d/70-pantalla-webcams.rules";
+
+/// ¿Puede el usuario crear webcams al vuelo? (hace falta para la cámara del 2º móvil y siguientes)
+fn ctl_writable() -> bool {
+    std::fs::OpenOptions::new().read(true).write(true).open("/dev/v4l2loopback").is_ok()
+        || std::path::Path::new(UDEV_RULE).exists()
+}
+
+/// El usuario con sesión abierta puede crear y quitar webcams v4l2loopback (como con /dev/video*)
+fn webcam_ctl() {
+    let _ = std::fs::write(UDEV_RULE, "# pantalla-host: una webcam por cada móvil conectado (Cámara de <móvil>)\n\
+                                       KERNEL==\"v4l2loopback\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\"\n");
+    run("udevadm", &["control", "--reload"]);
+    run("udevadm", &["trigger", "--subsystem-match=misc", "--sysname-match=v4l2loopback"]);
+    println!("Webcams al vuelo: permitido (/dev/v4l2loopback).");
 }
 
 fn firewall_closed() -> bool {
@@ -94,7 +113,9 @@ pub fn prepare() -> Result<(), String> {
         return Err("hace falta ser administrador: sudo pantalla-host preparar-sistema".into());
     }
     firewall();
-    webcam()
+    webcam()?;
+    webcam_ctl();
+    Ok(())
 }
 
 /// Desde `instalar` (usuario normal): pide la contraseña una vez y lo prepara

@@ -37,6 +37,13 @@ Plan (sin ffmpeg/mpv/PyAV):
 `/standby?on=1`. Portar: tiempo (open-meteo por HTTP), música (MPRIS por D-Bus / `playerctl` no está),
 PC (CPU/RAM de /proc).
 
-## App (código en el Nobara)
-- Mostrar `platform` (linux/windows) y `v` del mensaje `info`.
-- Elegir "escritorio nuevo" o "duplicar" (en Windows sin driver virtual solo duplicar).
+## App (código en `app/`)
+- [x] Icono Linux/Windows en la lista de equipos (campo `platform`).
+- [x] Botón de menú siempre visible en el escritorio (Desconectar / Volver).
+- [x] Sin conexión automática (el `depuracion.json` del móvil está renombrado a `.desactivado`).
+- [ ] Elegir "escritorio nuevo" o "duplicar" (en Windows sin driver virtual solo duplicar): falta en host y app.
+- Compilar: en el PC (Arch) `~/.local/share/movil-pantalla/app/build.sh` (compila en el Nobara, firma en el PC).
+
+## Probado en el Nobara (Hyprland 0.57, configuración Lua) — 2026-11-17
+Instancia de pruebas + `prueba`: 30 fps, la salida MOVIL se crea y se quita sola. El hostname del Nobara es
+"Linux", así que su `host.conf` lleva `NAME=Nobara`.

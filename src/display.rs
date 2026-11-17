@@ -66,16 +66,17 @@ impl FrameSlot {
     }
 }
 
-/// Abre el monitor virtual del móvil en este sistema.
-pub fn open(width: u32, height: u32) -> Result<Arc<dyn Display>, String> {
+/// Abre el monitor virtual del móvil de la ranura `slot` en este sistema.
+pub fn open(width: u32, height: u32, slot: u8) -> Result<Arc<dyn Display>, String> {
     #[cfg(target_os = "linux")]
     {
-        return crate::linux::open(width, height);
+        return crate::linux::open(width, height, slot);
     }
     #[cfg(windows)]
     {
+        let _ = slot;
         return crate::windows::open(width, height);
     }
     #[allow(unreachable_code)]
-    Err(format!("sistema no soportado ({width}x{height})"))
+    Err(format!("sistema no soportado ({width}x{height}, {slot})"))
 }

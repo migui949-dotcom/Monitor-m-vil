@@ -22,7 +22,6 @@ use wayland_protocols_plasma::screencast::v1::client::{zkde_screencast_stream_un
 
 type Err = Box<dyn std::error::Error>;
 
-const NAME: &str = "MOVIL";
 pub const INTERFACES: &str = "zkde_screencast_unstable_v1,org_kde_kwin_fake_input";
 
 /// ¿Es una sesión de KWin? (aunque no nos deje usar sus protocolos)
@@ -147,12 +146,12 @@ fn bind_new_outputs(globals: &wayland_client::globals::GlobalList, qh: &QueueHan
 }
 
 /// Coloca el monitor del móvil (POSITION de host.conf: auto-left, auto-right, auto-up, auto-down o XxY)
-fn place(st: &St, out: &str, w: i32, h: i32) {
-    let others: Vec<_> = st.outs.values().filter(|o| o.0 != out && o.3 > 0).collect();
+fn place(st: &St, out: &str, w: i32, h: i32, slot: u8) {
+    let others: Vec<_> = st.outs.values().filter(|o| o.0 != out && o.3 > 0 && !crate::util::is_phone_output(&o.0)).collect();
     if others.is_empty() {
         return;
     }
-    let pos = crate::util::conf("POSITION").unwrap_or_else(|| "auto-right".into());
+    let pos = crate::util::position(slot);
     let (minx, maxx) = (others.iter().map(|o| o.1).min().unwrap(), others.iter().map(|o| o.1 + o.3).max().unwrap());
     let (miny, maxy) = (others.iter().map(|o| o.2).min().unwrap(), others.iter().map(|o| o.2 + o.4).max().unwrap());
     let left = others.iter().min_by_key(|o| o.1).unwrap();
@@ -174,7 +173,7 @@ fn place(st: &St, out: &str, w: i32, h: i32) {
     }
 }
 
-pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
+pub fn open(w: u32, h: u32, slot_nr: u8) -> Result<Arc<dyn Display>, String> {
     let conn = Connection::connect_to_env().map_err(|e| format!("Wayland: {e}"))?;
     let (globals, q) = registry_queue_init::<St>(&conn).map_err(|e| format!("Wayland: {e}"))?;
     let has = |n: &str| globals.contents().with_list(|l| l.iter().any(|g| g.interface == n));
@@ -194,7 +193,7 @@ pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
         std::thread::Builder::new()
             .name("kde".into())
             .spawn(move || {
-                if let Err(e) = run(conn, globals, q, w, h, slot, &stop, rx, &ready_tx) {
+                if let Err(e) = run(conn, globals, q, w, h, slot_nr, slot, &stop, rx, &ready_tx) {
                     let _ = ready_tx.send(Err(e.to_string()));
                     crate::host::log(&format!("kde: {e}"));
                 }
@@ -210,7 +209,7 @@ pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(conn: Connection, globals: wayland_client::globals::GlobalList, mut q: EventQueue<St>, w: u32, h: u32, slot: Arc<FrameSlot>,
+fn run(conn: Connection, globals: wayland_client::globals::GlobalList, mut q: EventQueue<St>, w: u32, h: u32, slot_nr: u8, slot: Arc<FrameSlot>,
        stop: &AtomicBool, rx: Receiver<Input>, ready: &Sender<Result<(), String>>) -> Result<(), Err> {
     let qh = q.handle();
     let mut st = St::default();
@@ -224,12 +223,13 @@ fn run(conn: Connection, globals: wayland_client::globals::GlobalList, mut q: Ev
     bind_new_outputs(&globals, &qh, &xm, &mut seen);
     q.roundtrip(&mut st)?;
     let before: Vec<String> = st.outs.values().map(|o| o.0.clone()).collect();
+    let name = crate::util::output_name(slot_nr);
 
     // 2 = puntero dibujado en la imagen
     let stream = if sc.version() >= 4 {
-        sc.stream_virtual_output_with_description(NAME.into(), "Móvil (Escritorio)".into(), w as i32, h as i32, 1.0, 2, &qh, ())
+        sc.stream_virtual_output_with_description(name.clone(), format!("Móvil {slot_nr} (Escritorio)"), w as i32, h as i32, 1.0, 2, &qh, ())
     } else {
-        sc.stream_virtual_output(NAME.into(), w as i32, h as i32, 1.0, 2, &qh, ())
+        sc.stream_virtual_output(name.clone(), w as i32, h as i32, 1.0, 2, &qh, ())
     };
     let t0 = Instant::now();
     while st.node.is_none() && t0.elapsed() < Duration::from_secs(8) {
@@ -248,11 +248,11 @@ fn run(conn: Connection, globals: wayland_client::globals::GlobalList, mut q: Ev
     while out.is_none() && t1.elapsed() < Duration::from_secs(3) {
         bind_new_outputs(&globals, &qh, &xm, &mut seen);
         q.roundtrip(&mut st)?;
-        out = st.outs.values().find(|o| !before.contains(&o.0) && o.0.contains(NAME)).map(|o| o.0.clone())
+        out = st.outs.values().find(|o| !before.contains(&o.0) && o.0.contains(&name)).map(|o| o.0.clone())
             .or_else(|| st.outs.values().find(|o| !before.contains(&o.0) && !o.0.is_empty()).map(|o| o.0.clone()));
     }
-    let out = out.unwrap_or_else(|| format!("Virtual-{NAME}"));
-    place(&st, &out, w as i32, h as i32);
+    let out = out.unwrap_or_else(|| format!("Virtual-{name}"));
+    place(&st, &out, w as i32, h as i32, slot_nr);
     q.roundtrip(&mut st)?;
     crate::host::log(&format!("kde: monitor {out} (nodo PipeWire {node})"));
     let _ = ready.send(Ok(()));

@@ -17,8 +17,6 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{zwp_virtual_keyboa
 use wayland_protocols_wlr::screencopy::v1::client::{zwlr_screencopy_frame_v1 as scf, zwlr_screencopy_manager_v1 as scm};
 use wayland_protocols_wlr::virtual_pointer::v1::client::{zwlr_virtual_pointer_manager_v1 as vpm, zwlr_virtual_pointer_v1 as vp};
 
-const OUTPUT: &str = "MOVIL";
-
 // ───────────── Hyprland ─────────────
 
 /// Si se arranca desde systemd o SSH puede faltar el entorno de Hyprland: se busca la sesión.
@@ -77,7 +75,8 @@ pub fn is_hyprland() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() && hyprctl(&["version"]).map(|v| v.contains("Hyprland")).unwrap_or(false)
 }
 
-static SIZE: std::sync::Mutex<Option<(u32, u32)>> = std::sync::Mutex::new(None);
+/// Tamaño de cada monitor de móvil abierto (por ranura), para recolocarlos
+static SIZES: std::sync::Mutex<Vec<(u8, u32, u32)>> = std::sync::Mutex::new(Vec::new());
 
 fn lua_config() -> bool {
     hyprctl(&["eval", "return 1"])
@@ -88,40 +87,47 @@ fn lua_config() -> bool {
         .unwrap_or(false)
 }
 
-fn monitor_rule(w: u32, h: u32, lua: bool) -> Result<(), String> {
-    let pos = crate::util::conf("POSITION").unwrap_or_else(|| "auto-right".into());
+fn monitor_rule(slot: u8, w: u32, h: u32, lua: bool) -> Result<(), String> {
+    let out = crate::util::output_name(slot);
+    let pos = crate::util::position(slot);
     let mode = format!("{w}x{h}@60");
     if lua {
-        hyprctl(&["eval", &format!("hl.monitor({{ output = \"{OUTPUT}\", mode = \"{mode}\", position = \"{pos}\", scale = \"1\" }})")])?;
+        hyprctl(&["eval", &format!("hl.monitor({{ output = \"{out}\", mode = \"{mode}\", position = \"{pos}\", scale = \"1\" }})")])?;
     } else {
-        hyprctl(&["keyword", "monitor", &format!("{OUTPUT},{mode},{pos},1")])?;
+        hyprctl(&["keyword", "monitor", &format!("{out},{mode},{pos},1")])?;
     }
     Ok(())
 }
 
-/// Recoloca el monitor del móvil con la POSITION de host.conf (si hay uno ahora)
-pub fn reposition() {
-    if let Some((w, h)) = *SIZE.lock().unwrap() {
+/// Recoloca el monitor del móvil de la ranura `slot` con su posición de host.conf (si está abierto)
+pub fn reposition(slot: u8) {
+    let size = SIZES.lock().unwrap().iter().find(|x| x.0 == slot).map(|x| (x.1, x.2));
+    if let Some((w, h)) = size {
         if is_hyprland() {
-            let _ = monitor_rule(w, h, lua_config());
+            let _ = monitor_rule(slot, w, h, lua_config());
         }
     }
 }
 
-fn create_monitor(w: u32, h: u32) -> Result<(), String> {
-    *SIZE.lock().unwrap() = Some((w, h));
+fn create_monitor(slot: u8, w: u32, h: u32) -> Result<(), String> {
+    let out = crate::util::output_name(slot);
+    {
+        let mut sz = SIZES.lock().unwrap();
+        sz.retain(|x| x.0 != slot);
+        sz.push((slot, w, h));
+    }
     // monitor con el foco ANTES de crear el del móvil (al crearlo, Hyprland le da el foco)
     let prev = hyprctl(&["activeworkspace"]).ok()
         .and_then(|t| t.split(" on monitor ").nth(1).map(|r| r.split(':').next().unwrap_or("").trim().to_string()));
-    if !hyprctl(&["monitors", "all"])?.lines().any(|l| l.starts_with(&format!("Monitor {OUTPUT} "))) {
-        hyprctl(&["output", "create", "headless", OUTPUT])?;
+    if !hyprctl(&["monitors", "all"])?.lines().any(|l| l.starts_with(&format!("Monitor {out} "))) {
+        hyprctl(&["output", "create", "headless", &out])?;
         std::thread::sleep(Duration::from_millis(300));
     }
     let lua = lua_config();
-    monitor_rule(w, h, lua)?;
-    // Escritorio propio (11 por defecto, PHONE_WS en host.conf): Hyprland le da el primer número
+    monitor_rule(slot, w, h, lua)?;
+    // Escritorio propio (PHONE_WS de host.conf + 10 por ranura): si no, Hyprland le da el primer número
     // libre y entonces Super+3 (por ejemplo) llevaba al móvil y las ventanas acababan allí
-    let ws = crate::util::conf("PHONE_WS").unwrap_or_else(|| "11".into());
+    let ws = crate::util::phone_workspace(slot).to_string();
     // con configuración en Lua, `hyprctl dispatch X` es hl.dispatch(X): otra sintaxis
     let focus = |kind: &str, v: &str| {
         if lua {
@@ -131,26 +137,49 @@ fn create_monitor(w: u32, h: u32) -> Result<(), String> {
             let _ = hyprctl(&["dispatch", if kind == "monitor" { "focusmonitor" } else { "workspace" }, v]);
         }
     };
-    focus("monitor", OUTPUT);
+    focus("monitor", &out);
     focus("workspace", &ws);
-    if let Some(p) = prev.filter(|p| !p.is_empty() && p != OUTPUT) {
+    if let Some(p) = prev.filter(|p| !p.is_empty() && !crate::util::is_phone_output(p)) {
         focus("monitor", &p);
     }
-    still_wallpaper();
+    still_wallpaper(&out);
     Ok(())
 }
 
-pub fn remove_monitor() {
-    *SIZE.lock().unwrap() = None;
-    let _ = hyprctl(&["output", "remove", OUTPUT]);
+/// Quita el monitor del móvil de la ranura `slot` (y su fondo quieto)
+pub fn remove_monitor(slot: u8) {
+    let out = crate::util::output_name(slot);
+    SIZES.lock().unwrap().retain(|x| x.0 != slot);
+    let _ = hyprctl(&["output", "remove", &out]);
+    // el fondo quieto de ese monitor sobra; sin ningún móvil, vuelve el fondo de siempre
+    for (pid, args) in mpvpaper_procs() {
+        if args.iter().any(|a| *a == out) {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+    if SIZES.lock().unwrap().is_empty() {
+        normal_wallpaper();
+    }
+}
+
+/// Al arrancar: quita los monitores de móvil que hubieran quedado (cierre brusco)
+pub fn remove_all_monitors() {
+    let mons = hyprctl(&["monitors", "all"]).unwrap_or_default();
+    for m in mons.lines().filter_map(|l| l.strip_prefix("Monitor ")).filter_map(|l| l.split(' ').next()) {
+        if crate::util::is_phone_output(m) {
+            let _ = hyprctl(&["output", "remove", m]);
+        }
+    }
+    SIZES.lock().unwrap().clear();
     normal_wallpaper();
 }
 
 // ───────────── Fondo quieto en el móvil ─────────────
 // Un fondo de vídeo (mpvpaper en todas las salidas, '*') obliga a comprimir y mandar imágenes sin
-// parar: más retardo y más batería. Mientras está el móvil: el vídeo en las demás salidas y una
-// imagen quieta en la del móvil. Se lanza con systemd-run (fuera del servicio) y sin --fork (bajo
-// systemd-run, al salir el padre se cerraría el fondo).
+// parar: más retardo y más batería. Mientras hay algún móvil: el vídeo en las salidas del ordenador
+// y una imagen quieta en cada monitor de móvil. Se lanza con systemd-run (fuera del servicio) y sin
+// --fork (bajo systemd-run, al salir el padre se cerraría el fondo). Con awww (imagen) basta con
+// poner la misma imagen en el monitor nuevo.
 
 fn mpv_saved() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("movil-mpvpaper.cmd")
@@ -168,34 +197,60 @@ fn bg_run(args: &[String]) {
         .stderr(std::process::Stdio::null()).status();
 }
 
-fn mpvpaper_cmd() -> Option<Vec<String>> {
-    for e in std::fs::read_dir("/proc").ok()?.flatten() {
-        if std::fs::read_to_string(e.path().join("comm")).map(|c| c.trim() == "mpvpaper").unwrap_or(false) {
+/// (pid, argumentos) de cada mpvpaper en marcha
+fn mpvpaper_procs() -> Vec<(i32, Vec<String>)> {
+    std::fs::read_dir("/proc").into_iter().flatten().flatten()
+        .filter(|e| std::fs::read_to_string(e.path().join("comm")).map(|c| c.trim() == "mpvpaper").unwrap_or(false))
+        .filter_map(|e| {
+            let pid = e.file_name().to_str()?.parse().ok()?;
             let raw = std::fs::read(e.path().join("cmdline")).ok()?;
-            return Some(raw.split(|b| *b == 0).filter(|a| !a.is_empty())
-                .map(|a| String::from_utf8_lossy(a).into_owned()).filter(|a| a != "--fork").collect());
-        }
-    }
-    None
+            Some((pid, raw.split(|b| *b == 0).filter(|a| !a.is_empty())
+                .map(|a| String::from_utf8_lossy(a).into_owned()).filter(|a| a != "--fork").collect()))
+        })
+        .collect()
 }
 
-fn still_wallpaper() {
-    let Some(args) = mpvpaper_cmd() else { return };
-    if args.len() < 3 || args[args.len() - 2] != "*" || mpv_saved().exists() {
-        return;
-    }
-    let _ = std::fs::write(mpv_saved(), args.join("\0"));
+fn still_image(video: &str) -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let img = format!("{home}/.cache/movil-fondo.png");
     if !std::path::Path::new(&img).exists() {
-        let _ = Command::new("ffmpeg").args(["-loglevel", "error", "-y", "-i", &args[args.len() - 1], "-frames:v", "1", &img])
+        let _ = Command::new("ffmpeg").args(["-loglevel", "error", "-y", "-i", video, "-frames:v", "1", &img])
             .stdin(std::process::Stdio::null()).status();
     }
+    std::path::Path::new(&img).exists().then_some(img)
+}
+
+fn still_wallpaper(out: &str) {
+    // fondo de imagen con awww: la misma imagen en el monitor del móvil
+    if mpvpaper_procs().is_empty() {
+        let q = Command::new("awww").arg("query").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        if let Some(img) = q.lines().find_map(|l| l.split("image: ").nth(1)).map(|s| s.trim().to_string()) {
+            let _ = Command::new("awww").args(["img", "-o", out, "--transition-type", "none", &img])
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        }
+        return;
+    }
+    // ya repartido (hay otro móvil): solo falta la imagen quieta de este
+    if let Ok(saved) = std::fs::read_to_string(mpv_saved()) {
+        let args: Vec<String> = saved.split('\0').filter(|a| !a.is_empty()).map(String::from).collect();
+        if args.len() >= 3 {
+            if let Some(img) = still_image(&args[args.len() - 1]) {
+                bg_run(&[args[0].clone(), "-o".into(), "no-audio image-display-duration=inf panscan=1.0".into(), out.into(), img]);
+            }
+        }
+        return;
+    }
+    let Some((_, args)) = mpvpaper_procs().into_iter().next() else { return };
+    if args.len() < 3 || args[args.len() - 2] != "*" {
+        return;
+    }
+    let _ = std::fs::write(mpv_saved(), args.join("\0"));
+    let img = still_image(&args[args.len() - 1]);
     let _ = Command::new("pkill").args(["-x", "mpvpaper"]).status();
     std::thread::sleep(Duration::from_millis(300));
     let mons = hyprctl(&["monitors"]).unwrap_or_default();
     for m in mons.lines().filter_map(|l| l.strip_prefix("Monitor ")).filter_map(|l| l.split(' ').next()) {
-        if m == OUTPUT {
+        if crate::util::is_phone_output(m) {
             continue;
         }
         let mut a = args.clone();
@@ -203,8 +258,8 @@ fn still_wallpaper() {
         a[n - 2] = m.to_string();
         bg_run(&a);
     }
-    if std::path::Path::new(&img).exists() {
-        bg_run(&[args[0].clone(), "-o".into(), "no-audio image-display-duration=inf panscan=1.0".into(), OUTPUT.into(), img]);
+    if let Some(img) = img {
+        bg_run(&[args[0].clone(), "-o".into(), "no-audio image-display-duration=inf panscan=1.0".into(), out.into(), img]);
     }
 }
 
@@ -214,19 +269,12 @@ fn normal_wallpaper() {
     let args: Vec<String> = saved.split('\0').filter(|a| !a.is_empty()).map(String::from).collect();
     // primero el fondo de siempre y luego se quitan los de ahora: si algo corta a medias, nunca
     // se queda la pantalla sin fondo
-    let old = mpvpaper_pids();
+    let old: Vec<i32> = mpvpaper_procs().into_iter().map(|p| p.0).collect();
     bg_run(&args);
     std::thread::sleep(Duration::from_millis(500));
     for pid in old {
         unsafe { libc::kill(pid, libc::SIGTERM) };
     }
-}
-
-fn mpvpaper_pids() -> Vec<i32> {
-    std::fs::read_dir("/proc").into_iter().flatten().flatten()
-        .filter(|e| std::fs::read_to_string(e.path().join("comm")).map(|c| c.trim() == "mpvpaper").unwrap_or(false))
-        .filter_map(|e| e.file_name().to_str()?.parse().ok())
-        .collect()
 }
 
 // ───────────── Display ─────────────
@@ -239,6 +287,7 @@ enum Input {
 struct Hypr {
     w: u32,
     h: u32,
+    slot_nr: u8,
     slot: Arc<FrameSlot>,
     stop: Arc<AtomicBool>,
     input: Mutex<Sender<Input>>,
@@ -262,19 +311,22 @@ impl Display for Hypr {
 impl Drop for Hypr {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        remove_monitor();
+        remove_monitor(self.slot_nr);
     }
 }
 
-pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
+/// Las salidas que se crean/quitan en Hyprland a la vez se pisan (dos móviles conectando juntos)
+static HYPR_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn open(w: u32, h: u32, slot_nr: u8) -> Result<Arc<dyn Display>, String> {
     ensure_env();
     if crate::kde::is_kwin() {
-        return crate::kde::open(w, h);
+        return crate::kde::open(w, h, slot_nr);
     }
     if !is_hyprland() {
         // KDE Plasma (KWin): monitor virtual por zkde_screencast + PipeWire
         if crate::kde::is_kwin() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            match crate::kde::open(w, h) {
+            match crate::kde::open(w, h, slot_nr) {
                 Ok(d) => return Ok(d),
                 Err(e) if crate::kde::is_kwin() => return Err(e),
                 Err(_) => {}
@@ -282,16 +334,20 @@ pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
         }
         return Err("escritorio no soportado todavía: hace falta Hyprland o KDE Plasma (Wayland)".into());
     }
-    create_monitor(w, h)?;
+    {
+        let _g = HYPR_LOCK.lock().unwrap();
+        create_monitor(slot_nr, w, h)?;
+    }
+    let out = crate::util::output_name(slot_nr);
     let slot = Arc::new(FrameSlot::default());
     let stop = Arc::new(AtomicBool::new(false));
     {
-        let (slot, stop) = (slot.clone(), stop.clone());
+        let (slot, stop, out) = (slot.clone(), stop.clone(), out.clone());
         std::thread::Builder::new()
-            .name("captura".into())
+            .name(format!("captura-{slot_nr}"))
             .spawn(move || {
-                if let Err(e) = capture_loop(&slot, &stop) {
-                    crate::host::log(&format!("captura: {e}"));
+                if let Err(e) = capture_loop(&out, &slot, &stop) {
+                    crate::host::log(&format!("captura {out}: {e}"));
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -300,15 +356,15 @@ pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
     {
         let stop = stop.clone();
         std::thread::Builder::new()
-            .name("entrada".into())
+            .name(format!("entrada-{slot_nr}"))
             .spawn(move || {
-                if let Err(e) = input_loop(rx, w, h, &stop) {
-                    crate::host::log(&format!("entrada: {e}"));
+                if let Err(e) = input_loop(&out, rx, w, h, &stop) {
+                    crate::host::log(&format!("entrada {out}: {e}"));
                 }
             })
             .map_err(|e| e.to_string())?;
     }
-    Ok(Arc::new(Hypr { w, h, slot, stop, input: Mutex::new(tx) }))
+    Ok(Arc::new(Hypr { w, h, slot_nr, slot, stop, input: Mutex::new(tx) }))
 }
 
 // ───────────── Utilidades Wayland ─────────────
@@ -342,15 +398,15 @@ fn memfd(name: &str, size: usize) -> Result<OwnedFd, Err> {
     Ok(fd)
 }
 
-/// Busca la wl_output llamada MOVIL (protocolo wl_output v4: evento `name`).
+/// Busca la wl_output del móvil por su nombre (protocolo wl_output v4: evento `name`).
 #[derive(Default)]
 struct Outputs {
     list: Vec<(wl_output::WlOutput, Option<String>)>,
 }
 
 impl Outputs {
-    fn find(&self) -> Option<wl_output::WlOutput> {
-        self.list.iter().find(|(_, n)| n.as_deref() == Some(OUTPUT)).map(|(o, _)| o.clone())
+    fn find(&self, name: &str) -> Option<wl_output::WlOutput> {
+        self.list.iter().find(|(_, n)| n.as_deref() == Some(name)).map(|(o, _)| o.clone())
     }
 }
 
@@ -391,8 +447,8 @@ macro_rules! output_names {
     };
 }
 
-/// Conecta y espera (hasta 5 s) a que aparezca la salida MOVIL.
-fn connect_with_output<S>(mk: impl Fn() -> S, outs: impl Fn(&mut S) -> &mut Outputs) -> Result<(Connection, EventQueue<S>, wayland_client::globals::GlobalList, S, wl_output::WlOutput), Err>
+/// Conecta y espera (hasta 5 s) a que aparezca la salida `name`.
+fn connect_with_output<S>(name: &str, mk: impl Fn() -> S, outs: impl Fn(&mut S) -> &mut Outputs) -> Result<(Connection, EventQueue<S>, wayland_client::globals::GlobalList, S, wl_output::WlOutput), Err>
 where
     S: Dispatch<wl_output::WlOutput, ()> + Dispatch<wl_registry::WlRegistry, GlobalListContents> + 'static,
 {
@@ -404,11 +460,11 @@ where
         let mut s = mk();
         outs(&mut s).list = bind_outputs(&globals, &qh);
         q.roundtrip(&mut s)?;
-        if let Some(o) = outs(&mut s).find() {
+        if let Some(o) = outs(&mut s).find(name) {
             return Ok((conn, q, globals, s, o));
         }
         if t0.elapsed() > Duration::from_secs(5) {
-            return Err(format!("no aparece la salida {OUTPUT}").into());
+            return Err(format!("no aparece la salida {name}").into());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -453,8 +509,8 @@ struct ShmBuf {
     pool: wl_shm_pool::WlShmPool,
 }
 
-fn capture_loop(slot: &FrameSlot, stop: &AtomicBool) -> Result<(), Err> {
-    let (_conn, mut q, globals, mut s, output) = connect_with_output(Cap::default, |s| &mut s.outputs)?;
+fn capture_loop(name: &str, slot: &FrameSlot, stop: &AtomicBool) -> Result<(), Err> {
+    let (_conn, mut q, globals, mut s, output) = connect_with_output(name, Cap::default, |s| &mut s.outputs)?;
     let qh = q.handle();
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ())?;
     let mgr: scm::ZwlrScreencopyManagerV1 = globals.bind(&qh, 1..=3, ())?;
@@ -657,8 +713,8 @@ impl Keys {
     }
 }
 
-fn input_loop(rx: Receiver<Input>, w: u32, h: u32, stop: &AtomicBool) -> Result<(), Err> {
-    let (conn, mut q, globals, mut s, output) = connect_with_output(Inp::default, |s| &mut s.outputs)?;
+fn input_loop(name: &str, rx: Receiver<Input>, w: u32, h: u32, stop: &AtomicBool) -> Result<(), Err> {
+    let (conn, mut q, globals, mut s, output) = connect_with_output(name, Inp::default, |s| &mut s.outputs)?;
     let qh = q.handle();
     let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ())?;
     let pm: vpm::ZwlrVirtualPointerManagerV1 = globals.bind(&qh, 1..=2, ())?;

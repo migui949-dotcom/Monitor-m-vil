@@ -25,15 +25,18 @@ pub struct Identity {
 static IDENT: OnceLock<Identity> = OnceLock::new();
 static STATE: OnceLock<Mutex<St>> = OnceLock::new();
 
-/// Estado compartido (lo que se escribe en movild.json + lo necesario para /answer, /disconnect…).
+/// Un móvil conectado (una "ranura": 1, 2…; la 1 usa los nombres de siempre)
 #[derive(Default)]
-struct St {
-    peer: Option<Value>,
-    since: Option<f64>,
-    pending: Option<Value>,
-    pending_tx: Option<oneshot::Sender<bool>>,
+struct Sess {
+    peer: Value,
+    since: f64,
+    device: String,
+    fp: String,
     phone: Option<Value>,
     standby: bool,
+    /// hay escritorio (monitor) para este móvil
+    screen: bool,
+    storage: Option<String>,
     ctl: Option<mpsc::UnboundedSender<(u8, Vec<u8>)>>,
     kick: Option<Arc<Notify>>,
     /// estado de cámara/micro (lo mismo que daba media.py en /state)
@@ -44,19 +47,40 @@ struct St {
     /// "user" (delantera) o "environment" (trasera)
     facing: String,
     media_error: String,
+    /// por qué este móvil no tiene webcam en el ordenador (si no la tiene)
+    cam_unavailable: Option<String>,
     #[cfg(target_os = "linux")]
     mic: Option<crate::audio::Mic>,
 }
 
-/// Marca de la sesión actual (None sin móvil): para olvidar lo encendido en la anterior
+struct Pending {
+    info: Value,
+    tx: Option<oneshot::Sender<bool>>,
+}
+
+/// Estado compartido (lo que se escribe en movild.json + lo necesario para /answer, /disconnect…).
+#[derive(Default)]
+struct St {
+    sessions: std::collections::BTreeMap<u8, Sess>,
+    pendings: Vec<Pending>,
+}
+
+/// Cuántos móviles a la vez (en Windows, uno: solo hay un monitor virtual o se duplica la pantalla)
+fn max_phones() -> u8 {
+    if cfg!(windows) {
+        return 1;
+    }
+    util::conf("MAX_PHONES").and_then(|v| v.parse().ok()).unwrap_or(util::MAX_PHONES).clamp(1, util::MAX_PHONES)
+}
+
+/// (ranura, marca de su sesión) de cada móvil conectado: para olvidar lo encendido en una sesión anterior
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn session_since() -> Option<u64> {
-    let s = st();
-    s.peer.as_ref().and(s.since).map(|t| t.to_bits())
+pub fn session_marks() -> Vec<(u8, u64)> {
+    st().sessions.iter().map(|(k, v)| (*k, v.since.to_bits())).collect()
 }
 
 fn st() -> std::sync::MutexGuard<'static, St> {
-    STATE.get_or_init(|| Mutex::new(St::default())).lock().unwrap()
+    STATE.get_or_init(|| Mutex::new(St::default())).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn ident() -> &'static Identity {
@@ -77,11 +101,52 @@ pub fn status_path() -> PathBuf {
     std::env::var_os("MOVILD_STATUS").map(PathBuf::from).unwrap_or_else(|| util::state_dir().join("movild.json"))
 }
 
+fn facing(s: &Sess) -> String {
+    if s.facing.is_empty() { "user".into() } else { s.facing.clone() }
+}
+
+/// Cámara/micro de un móvil (lo de /state, más qué dispositivos son en este ordenador)
+fn media_json(slot: u8, s: &Sess) -> Value {
+    #[cfg(target_os = "linux")]
+    let (fps, cam_dev) = (crate::devices::fps(slot), crate::devices::webcam(slot));
+    #[cfg(not(target_os = "linux"))]
+    let (fps, cam_dev): (f32, Option<(String, String)>) = (0.0, None);
+    #[cfg(target_os = "linux")]
+    let mic_source = crate::audio::mic_name(slot);
+    #[cfg(not(target_os = "linux"))]
+    let mic_source = String::new();
+    json!({"s": slot, "device": s.device, "cam": s.cam_on, "mic": s.mic_on, "facing": facing(s), "codec": "h264",
+           "error": s.media_error, "camOk": s.cam_ok, "micOk": s.mic_ok, "fps": fps,
+           "using": if s.cam_on { "h264" } else { "" }, "host": "pantalla-host",
+           "video": cam_dev.as_ref().map(|d| d.0.clone()), "cam_label": cam_dev.map(|d| d.1),
+           "cam_unavailable": s.cam_unavailable,
+           "mic_source": mic_source,
+           "mic_label": if slot <= 1 { "Micrófono del móvil".to_string() } else { format!("Micrófono de {}", s.device) }})
+}
+
+fn session_json(slot: u8, s: &Sess) -> Value {
+    #[cfg(target_os = "linux")]
+    let sink = Some(crate::audio::sink_name(slot));
+    #[cfg(not(target_os = "linux"))]
+    let sink: Option<String> = None;
+    json!({"s": slot, "output": if s.screen { Some(util::output_name(slot)) } else { None },
+           "peer": s.peer, "since": s.since, "phone": s.phone, "standby": s.standby,
+           "position": util::position(slot), "ws": util::phone_workspace(slot), "storage": s.storage,
+           "sink": sink, "media": media_json(slot, s)})
+}
+
 fn write_status() {
     let s = st();
+    let first = s.sessions.values().next();
+    let pendings: Vec<Value> = s.pendings.iter().map(|p| p.info.clone()).collect();
     let v = json!({
-        "connected": s.peer.is_some(), "peer": s.peer, "since": s.since, "pending": s.pending,
-        "standby": s.standby, "phone": if s.peer.is_some() { s.phone.clone() } else { None },
+        // compatibilidad (barra y paneles de antes): lo del primer móvil
+        "connected": first.is_some(), "peer": first.map(|f| f.peer.clone()), "since": first.map(|f| f.since),
+        "pending": pendings.first(), "standby": first.map(|f| f.standby).unwrap_or(false),
+        "phone": first.and_then(|f| f.phone.clone()),
+        // todos
+        "pendings": pendings, "max": max_phones(),
+        "sessions": s.sessions.iter().map(|(k, v)| session_json(*k, v)).collect::<Vec<_>>(),
     });
     drop(s);
     // se escribe sobre el mismo archivo (no se reemplaza): Quickshell lo vigila por inotify
@@ -180,7 +245,7 @@ fn info() -> Value {
     let i = ident();
     json!({"t": "info", "name": host_name(), "os": os_name(), "platform": platform(),
            "id": i.id, "key": hex(&i.public), "fp": fingerprint(&i.public),
-           "busy": st().peer.is_some(), "host": "pantalla-host", "v": env!("CARGO_PKG_VERSION")})
+           "busy": st().sessions.len() >= max_phones() as usize, "phones": st().sessions.len(), "host": "pantalla-host", "v": env!("CARGO_PKG_VERSION")})
 }
 
 // ───────────── Descubrimiento ─────────────
@@ -231,26 +296,42 @@ async fn ask_user(device: &str, fp: &str, via: &str) -> bool {
         let (tx, rx) = oneshot::channel();
         let mut idb = [0u8; 6];
         getrandom::getrandom(&mut idb).unwrap();
+        let id = hex(&idb);
+        let connected = st().sessions.len();
         {
             let mut s = st();
-            s.pending = Some(json!({"id": hex(&idb), "device": device, "fp": fp, "via": via,
-                                    "expires": unix_time() + TIMEOUT as f64, "timeout": TIMEOUT}));
-            s.pending_tx = Some(tx);
+            s.pendings.push(Pending {
+                info: json!({"id": id, "device": device, "fp": fp, "via": via, "connected": connected,
+                             "expires": unix_time() + TIMEOUT as f64, "timeout": TIMEOUT}),
+                tx: Some(tx),
+            });
         }
         write_status();
         let r = tokio::time::timeout(Duration::from_secs(TIMEOUT), rx).await;
-        {
-            let mut s = st();
-            s.pending = None;
-            s.pending_tx = None;
-        }
+        st().pendings.retain(|p| p.info["id"].as_str() != Some(id.as_str()));
         write_status();
         return matches!(r, Ok(Ok(true)));
     }
     crate::notify::ask(device, fp, via, TIMEOUT).await
 }
 
-/// GET /answer?id=…&ok=1|0, /disconnect, /screen?on=, /brightness?v=, /standby?on=  (solo 127.0.0.1)
+type Query<'a> = std::collections::HashMap<&'a str, &'a str>;
+
+/// El móvil al que va una orden: `s=N` (ranura) o, sin él, el primero conectado
+fn pick(q: &Query) -> Option<u8> {
+    let s = st();
+    match q.get("s").and_then(|v| v.parse::<u8>().ok()) {
+        Some(n) => s.sessions.contains_key(&n).then_some(n),
+        None => s.sessions.keys().next().copied(),
+    }
+}
+
+fn ctl_of(slot: u8) -> Option<mpsc::UnboundedSender<(u8, Vec<u8>)>> {
+    st().sessions.get(&slot).and_then(|s| s.ctl.clone())
+}
+
+/// GET /answer?id=…&ok=1|0, /disconnect, /screen?on=, /brightness?v=, /standby?on=, /position?p=
+/// (todas con &s=N para elegir el móvil; sin él, el primero)  (solo 127.0.0.1)
 async fn answer_http(stream: TcpStream) {
     let mut r = BufReader::new(stream);
     let mut line = String::new();
@@ -259,25 +340,30 @@ async fn answer_http(stream: TcpStream) {
     }
     let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
     let (route, qs) = path.split_once('?').unwrap_or((&path, ""));
-    let q: std::collections::HashMap<&str, &str> = qs.split('&').filter_map(|kv| kv.split_once('=')).collect();
-    let ctl = st().ctl.clone();
+    let q: Query = qs.split('&').filter_map(|kv| kv.split_once('=')).collect();
+    let slot = pick(&q);
+    let ctl = slot.and_then(ctl_of);
     let send = |v: Value| ctl.as_ref().map(|c| c.send((0, v.to_string().into_bytes())).is_ok()).unwrap_or(false);
     let ok = match route {
-        "/disconnect" => st().kick.clone().map(|k| k.notify_waiters()).is_some(),
-        "/media" => match q.get("mic") {
-            Some(v) => {
-                let on = if *v == "toggle" { !st().mic_on } else { matches!(*v, "1" | "on" | "true") };
-                set_mic(on).await
+        "/disconnect" => slot.and_then(|n| st().sessions.get(&n).and_then(|s| s.kick.clone())).map(|k| k.notify_waiters()).is_some(),
+        "/media" => match (q.get("mic"), slot) {
+            (Some(v), Some(n)) => {
+                let cur = st().sessions.get(&n).map(|s| s.mic_on).unwrap_or(false);
+                let on = if *v == "toggle" { !cur } else { matches!(*v, "1" | "on" | "true") };
+                set_mic(n, on).await
             }
-            None => false,
+            _ => false,
         },
         "/screen" => send(json!({"t": "screen", "on": matches!(q.get("on").copied().unwrap_or("1"), "1" | "on")})),
         "/position" => {
             let p = q.get("p").copied().unwrap_or("");
+            // sin móvil conectado vale para el primero (o el de s=N), así se puede dejar elegido antes
+            let n = slot.or_else(|| q.get("s").and_then(|v| v.parse().ok())).unwrap_or(1);
             if matches!(p, "left" | "right" | "up" | "down") {
-                let _ = util::set_conf("POSITION", &format!("auto-{p}"));
+                let _ = util::set_conf(&util::position_key(n), &format!("auto-{p}"));
                 #[cfg(target_os = "linux")]
-                crate::linux::reposition();
+                tokio::task::spawn_blocking(move || crate::linux::reposition(n));
+                write_status();
                 true
             } else {
                 false
@@ -285,116 +371,156 @@ async fn answer_http(stream: TcpStream) {
         }
         "/brightness" => send(json!({"t": "brightness", "v": q.get("v").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0)})),
         "/standby" => {
-            let cur = st().standby;
+            let Some(n) = slot else { return reply(&mut r, false).await };
+            let cur = st().sessions.get(&n).map(|s| s.standby).unwrap_or(false);
             let on = match q.get("on").copied().unwrap_or("toggle") {
                 "toggle" => !cur,
                 v => matches!(v, "1" | "on"),
             };
             let ok = send(json!({"t": "standby", "on": on}));
             if ok {
-                st().standby = on;
+                if let Some(s) = st().sessions.get_mut(&n) {
+                    s.standby = on;
+                }
                 write_status();
             }
             ok
         }
         _ => {
             let mut s = st();
-            let matches = s.pending.as_ref().and_then(|p| p.get("id")).and_then(|v| v.as_str()) == q.get("id").copied();
-            if matches {
-                if let Some(tx) = s.pending_tx.take() {
+            let id = q.get("id").copied();
+            match s.pendings.iter_mut().find(|p| p.info["id"].as_str() == id).and_then(|p| p.tx.take()) {
+                Some(tx) => {
                     let _ = tx.send(q.get("ok").copied() == Some("1"));
                     true
-                } else {
-                    false
                 }
-            } else {
-                false
+                None => false,
             }
         }
     };
+    reply(&mut r, ok).await;
+}
+
+async fn reply(r: &mut BufReader<TcpStream>, ok: bool) {
     let status = if ok { "200 OK" } else { "404 Not Found" };
     let _ = r.get_mut().write_all(format!("HTTP/1.0 {status}\r\nContent-Length: 0\r\n\r\n").as_bytes()).await;
 }
 
 // ───────────── Cámara / micrófono (compatible con /state y /set de media.py) ─────────────
 
-fn media_state() -> Value {
+/// /state: el móvil pedido (o el primero) y, sin s=, también la lista de todos
+fn media_state(q: &Query) -> Value {
+    let slot = pick(q);
     let s = st();
-    #[cfg(target_os = "linux")]
-    let fps = crate::devices::fps();
-    #[cfg(not(target_os = "linux"))]
-    let fps = 0.0;
-    json!({"cam": s.cam_on, "mic": s.mic_on, "facing": facing(&s), "codec": "h264", "error": s.media_error,
-           "camOk": s.cam_ok, "micOk": s.mic_ok, "fps": fps, "using": if s.cam_on { "h264" } else { "" }, "host": "pantalla-host"})
+    let mut v = match slot.and_then(|n| s.sessions.get(&n).map(|x| (n, x))) {
+        Some((n, x)) => media_json(n, x),
+        None => json!({"cam": false, "mic": false, "facing": "user", "codec": "h264", "error": "", "camOk": false,
+                       "micOk": false, "fps": 0.0, "using": "", "host": "pantalla-host"}),
+    };
+    if !q.contains_key("s") {
+        v["sessions"] = Value::Array(s.sessions.iter().map(|(k, x)| media_json(*k, x)).collect());
+    }
+    v
 }
 
-/// Enciende/apaga el micrófono del móvil como fuente de este equipo.
-async fn set_mic(on: bool) -> bool {
-    let ctl = st().ctl.clone();
-    let Some(ctl) = ctl else { return false };
+/// RGB PREVIEW_W x PREVIEW_H → BMP de 24 bits (filas de abajo arriba, en BGR)
+#[cfg(target_os = "linux")]
+fn to_bmp(rgb: &[u8]) -> Vec<u8> {
+    let (w, h) = (crate::devices::PREVIEW_W, crate::devices::PREVIEW_H);
+    let row = w * 3; // 640*3 ya es múltiplo de 4: sin relleno
+    let size = 54 + row * h;
+    let mut v = Vec::with_capacity(size);
+    v.extend_from_slice(b"BM");
+    for x in [size as u32, 0, 54, 40, w as u32, h as u32] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&24u16.to_le_bytes());
+    for x in [0u32, (row * h) as u32, 2835, 2835, 0, 0] {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    for y in (0..h).rev() {
+        for p in rgb[y * row..(y + 1) * row].chunks(3) {
+            v.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
+    }
+    v
+}
+
+/// Enciende/apaga el micrófono del móvil `slot` como fuente de este equipo.
+async fn set_mic(slot: u8, on: bool) -> bool {
+    let Some(ctl) = ctl_of(slot) else { return false };
     #[cfg(target_os = "linux")]
     {
-        let cur = st().mic.is_some();
+        let (cur, device) = st().sessions.get(&slot).map(|s| (s.mic.is_some(), s.device.clone())).unwrap_or_default();
         if on && !cur {
-            let m = tokio::task::spawn_blocking(crate::audio::Mic::start).await.ok().flatten();
+            let m = tokio::task::spawn_blocking(move || crate::audio::Mic::start(slot, &device)).await.ok().flatten();
+            let mut s = st();
+            let Some(x) = s.sessions.get_mut(&slot) else { return false };
             if m.is_none() {
-                st().media_error = "No se pudo crear el micrófono (¿falta pactl?)".into();
+                x.media_error = "No se pudo crear el micrófono (¿falta pactl?)".into();
             }
-            st().mic = m;
+            x.mic = m;
         } else if !on && cur {
-            let m = st().mic.take();
+            let m = st().sessions.get_mut(&slot).and_then(|x| x.mic.take());
             let _ = tokio::task::spawn_blocking(move || drop(m)).await;
         }
     }
     {
         let mut s = st();
-        s.mic_on = on;
+        let Some(x) = s.sessions.get_mut(&slot) else { return false };
+        x.mic_on = on;
         if !on {
-            s.mic_ok = false;
+            x.mic_ok = false;
         }
     }
     let _ = ctl.send((0, json!({"t": "mic", "on": on}).to_string().into_bytes()));
-    send_media(&ctl);
+    send_media(slot, &ctl);
+    write_status();
     true
 }
 
-fn facing(s: &St) -> String {
-    if s.facing.is_empty() { "user".into() } else { s.facing.clone() }
-}
-
 /// Estado de cámara/micro a la app (ella enciende o apaga lo suyo)
-fn send_media(ctl: &mpsc::UnboundedSender<(u8, Vec<u8>)>) {
+fn send_media(slot: u8, ctl: &mpsc::UnboundedSender<(u8, Vec<u8>)>) {
     let s = st();
-    let m = json!({"t": "media", "cam": s.cam_on, "mic": s.mic_on, "facing": facing(&s)});
+    let Some(x) = s.sessions.get(&slot) else { return };
+    let m = json!({"t": "media", "cam": x.cam_on, "mic": x.mic_on, "facing": facing(x)});
     drop(s);
     let _ = ctl.send((0, m.to_string().into_bytes()));
 }
 
-/// Enciende/apaga la cámara del móvil (webcam "Cámara del móvil"); flip cambia delantera/trasera
-fn set_cam(on: Option<bool>, flip: bool) -> bool {
-    let ctl = st().ctl.clone();
-    let Some(ctl) = ctl else { return false };
+/// Enciende/apaga la cámara del móvil `slot` (su webcam en el ordenador); flip cambia delantera/trasera
+fn set_cam(slot: u8, on: Option<bool>, flip: bool) -> bool {
+    let Some(ctl) = ctl_of(slot) else { return false };
     {
         let mut s = st();
+        let Some(x) = s.sessions.get_mut(&slot) else { return false };
         if flip {
-            s.facing = if facing(&s) == "user" { "environment".into() } else { "user".into() };
+            x.facing = if facing(x) == "user" { "environment".into() } else { "user".into() };
         }
         if let Some(on) = on {
-            s.cam_on = on;
+            x.cam_on = on;
             if !on {
-                s.cam_ok = false;
+                x.cam_ok = false;
             }
         }
         #[cfg(target_os = "linux")]
-        if !s.cam_on {
-            crate::devices::cam_off();
+        if !x.cam_on {
+            crate::devices::cam_off(slot);
+        }
+        // sin webcam en este ordenador se puede ver igual en el panel, pero se avisa
+        if x.cam_on {
+            if let Some(why) = x.cam_unavailable.clone() {
+                x.media_error = why;
+            }
         }
         #[cfg(not(target_os = "linux"))]
-        if s.cam_on {
-            s.media_error = "La cámara del móvil aún no funciona en Windows".into();
+        if x.cam_on {
+            x.media_error = "La cámara del móvil aún no funciona en Windows".into();
         }
     }
-    send_media(&ctl);
+    send_media(slot, &ctl);
+    write_status();
     true
 }
 
@@ -406,13 +532,16 @@ async fn media_http(stream: TcpStream) {
     }
     let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
     let (route, qs) = path.split_once('?').unwrap_or((&path, ""));
-    let q: std::collections::HashMap<&str, &str> = qs.split('&').filter_map(|kv| kv.split_once('=')).collect();
+    let q: Query = qs.split('&').filter_map(|kv| kv.split_once('=')).collect();
     // GET /preview: la última imagen de la cámara en pequeño (RGB, PREVIEW_W x PREVIEW_H) para el panel
+    // GET /preview.bmp: lo mismo como imagen BMP (la barra Quickshell la enseña con un Image normal)
     #[cfg(target_os = "linux")]
-    if route == "/preview" {
-        let resp = match crate::devices::preview() {
+    if route == "/preview" || route == "/preview.bmp" {
+        let bmp = route.ends_with(".bmp");
+        let resp = match pick(&q).and_then(crate::devices::preview) {
             Some(px) => {
-                let mut v = format!("HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n", px.len()).into_bytes();
+                let (px, ct) = if bmp { (to_bmp(&px), "image/bmp") } else { (px, "application/octet-stream") };
+                let mut v = format!("HTTP/1.0 200 OK\r\nContent-Type: {ct}\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n", px.len()).into_bytes();
                 v.extend_from_slice(&px);
                 v
             }
@@ -422,23 +551,27 @@ async fn media_http(stream: TcpStream) {
         return;
     }
     let body = match route {
-        "/state" => Some(media_state()),
+        "/state" => Some(media_state(&q)),
         "/set" => {
-            if let Some(v) = q.get("mic") {
-                let on = if *v == "toggle" { !st().mic_on } else { matches!(*v, "1" | "on" | "true") };
-                set_mic(on).await;
+            if let Some(n) = pick(&q) {
+                let (mic_on, cam_on, cur_facing) =
+                    st().sessions.get(&n).map(|x| (x.mic_on, x.cam_on, facing(x))).unwrap_or_default();
+                if let Some(v) = q.get("mic") {
+                    let on = if *v == "toggle" { !mic_on } else { matches!(*v, "1" | "on" | "true") };
+                    set_mic(n, on).await;
+                }
+                let cam = q.get("cam").map(|v| if *v == "toggle" { !cam_on } else { matches!(*v, "1" | "on" | "true") });
+                let flip = q.get("facing").copied() == Some("flip")
+                    || q.get("facing").map(|f| *f != cur_facing && matches!(*f, "user" | "environment")).unwrap_or(false);
+                if cam.is_some() || flip {
+                    set_cam(n, cam, flip);
+                }
+                #[cfg(target_os = "linux")]
+                if cam == Some(true) && !q.contains_key("auto") && !crate::panel::alive() && !quickshell_running() {
+                    crate::panel::spawn();
+                }
             }
-            let cam = q.get("cam").map(|v| if *v == "toggle" { !st().cam_on } else { matches!(*v, "1" | "on" | "true") });
-            let flip = q.get("facing").copied() == Some("flip")
-                || q.get("facing").map(|f| *f != facing(&st()) && matches!(*f, "user" | "environment")).unwrap_or(false);
-            if cam.is_some() || flip {
-                set_cam(cam, flip);
-            }
-            #[cfg(target_os = "linux")]
-            if cam == Some(true) && !q.contains_key("auto") && !crate::panel::alive() {
-                crate::panel::spawn();
-            }
-            Some(media_state())
+            Some(media_state(&q))
         }
         _ => None,
     };
@@ -522,8 +655,25 @@ async fn handle(mut sock: TcpStream) -> Res<()> {
     };
     crate::dbg_log!("hola del móvil: {hello}");
     let device: String = hello.get("device").and_then(|d| d.as_str()).unwrap_or("Móvil").chars().take(40).collect();
-    if st().peer.is_some() {
-        let c = encrypt(&noise, &send_json(json!({"t": "rejected", "why": "Ya hay un móvil conectado a este equipo"})))?;
+    // el mismo móvil otra vez (se cortó la red y vuelve antes de que caduque la sesión vieja):
+    // se cierra la vieja en vez de abrirle un segundo escritorio
+    let old = st().sessions.iter().find(|(_, x)| x.fp == fp).map(|(k, x)| (*k, x.kick.clone()));
+    if let Some((n, kick)) = old {
+        log(&format!("{device} vuelve a conectarse: se cierra su sesión anterior (móvil {n})"));
+        if let Some(k) = kick {
+            k.notify_waiters();
+        }
+        for _ in 0..50 {
+            if !st().sessions.contains_key(&n) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    if st().sessions.len() >= max_phones() as usize {
+        let why = if max_phones() == 1 { "Ya hay un móvil conectado a este equipo".to_string() }
+                  else { format!("Ya hay {} móviles conectados a este equipo", max_phones()) };
+        let c = encrypt(&noise, &send_json(json!({"t": "rejected", "why": why})))?;
         write_frame(&mut wr, &c).await?;
         return Ok(());
     }
@@ -534,35 +684,46 @@ async fn handle(mut sock: TcpStream) -> Res<()> {
         log("rechazada");
         return Ok(());
     }
-    {
+    // ranura: la primera libre (la 1 = nombres de siempre: MOVIL, ~/Móvil, /dev/video42…)
+    let slot = {
         let mut s = st();
-        if s.peer.is_some() {
-            return Ok(());
+        let n = (1..=max_phones()).find(|n| !s.sessions.contains_key(n));
+        if let Some(n) = n {
+            s.sessions.insert(n, Sess {
+                peer: json!({"device": device, "fp": fp, "via": via}),
+                since: unix_time(),
+                device: device.clone(),
+                fp: fp.clone(),
+                ..Default::default()
+            });
         }
-        s.peer = Some(json!({"device": device, "fp": fp, "via": via}));
-        s.since = Some(unix_time());
-    }
+        n
+    };
+    let Some(slot) = slot else {
+        let c = encrypt(&noise, &send_json(json!({"t": "rejected", "why": "No quedan huecos para más móviles"})))?;
+        write_frame(&mut wr, &c).await?;
+        return Ok(());
+    };
     write_status();
-    log(&format!("aceptada: {device} por {via}"));
+    log(&format!("aceptada: {device} por {via} (móvil {slot})"));
 
-    let result = session(rd, wr, noise, &hello).await;
+    let result = session(rd, wr, noise, &hello, slot, device).await;
 
-    {
-        let mut s = st();
-        s.peer = None;
-        s.since = None;
-        s.phone = None;
-        s.standby = false;
-        s.ctl = None;
-        s.kick = None;
-    }
+    st().sessions.remove(&slot);
     write_status();
     if let Err(e) = &result {
-        log(&format!("sesión terminada: {e}"));
+        log(&format!("sesión terminada (móvil {slot}): {e}"));
     } else {
-        log("sesión terminada");
+        log(&format!("sesión terminada (móvil {slot})"));
     }
     Ok(())
+}
+
+/// Cambia algo de la sesión `slot` (si sigue ahí)
+fn with_sess(slot: u8, f: impl FnOnce(&mut Sess)) {
+    if let Some(x) = st().sessions.get_mut(&slot) {
+        f(x);
+    }
 }
 
 async fn session(
@@ -570,6 +731,8 @@ async fn session(
     mut wr: tokio::net::tcp::OwnedWriteHalf,
     noise: Arc<Mutex<snow::TransportState>>,
     hello: &Value,
+    slot: u8,
+    device: String,
 ) -> Res<()> {
     // Escritor: todo lo que se manda pasa por aquí (canal, datos) → cifrado en trozos de 60 000
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
@@ -601,9 +764,11 @@ async fn session(
 
     let kick = Arc::new(Notify::new());
     {
-        let mut s = st();
-        s.ctl = Some(out_tx.clone());
-        s.kick = Some(kick.clone());
+        let (o, k) = (out_tx.clone(), kick.clone());
+        with_sess(slot, |x| {
+            x.ctl = Some(o);
+            x.kick = Some(k);
+        });
     }
 
     let want: Vec<String> = hello.get("want").and_then(|w| w.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -616,14 +781,31 @@ async fn session(
     let mut screen_error = None;
     if want.iter().any(|w| w == "screen") {
         let (w, h) = screen_size(hello);
-        match tokio::task::spawn_blocking(move || crate::display::open(w, h)).await? {
+        match tokio::task::spawn_blocking(move || crate::display::open(w, h, slot)).await? {
             Ok(d) => display = Some(d),
             Err(e) => {
-                log(&format!("pantalla: {e}"));
+                log(&format!("pantalla (móvil {slot}): {e}"));
                 screen_error = Some(e);
             }
         }
     }
+    with_sess(slot, |x| x.screen = display.is_some());
+
+    // webcam y micrófono de este móvil en el ordenador (los del 1º ya existen siempre)
+    #[cfg(target_os = "linux")]
+    {
+        let dev = device.clone();
+        let (cam_err, _) = tokio::task::spawn_blocking(move || {
+            crate::audio::add_mic_source(slot, &dev);
+            (crate::devices::open_slot(slot, &dev).err(), ())
+        })
+        .await?;
+        if let Some(e) = &cam_err {
+            log(&format!("webcam (móvil {slot}): {e}"));
+        }
+        with_sess(slot, |x| x.cam_unavailable = cam_err);
+    }
+    write_status();
 
     // si no hay escritorio, el motivo va al móvil para que lo enseñe
     let accepted = json!({"t": "accepted", "name": host_name(), "screen": display.is_some(), "screen_error": screen_error});
@@ -647,31 +829,35 @@ async fn session(
     // Canal 2: altavoces del móvil
     #[cfg(target_os = "linux")]
     let speakers = if want.iter().any(|w| w == "audio") {
-        let out = out_tx.clone();
-        tokio::task::spawn_blocking(move || crate::audio::Speakers::start(out)).await.ok().flatten()
+        let (out, dev) = (out_tx.clone(), device.clone());
+        tokio::task::spawn_blocking(move || crate::audio::Speakers::start(out, slot, &dev)).await.ok().flatten()
     } else {
         None
     };
     #[cfg(windows)]
     let _speakers = if want.iter().any(|w| w == "audio") { crate::winaudio::Speakers::start(out_tx.clone()) } else { None };
 
-    // Canal 5: almacén del móvil → ~/Móvil (FUSE)
+    // Canal 5: almacén del móvil → ~/Móvil (el 1º) o "~/Móvil (<nombre>)" (los demás), por FUSE
     #[cfg(target_os = "linux")]
-    let (store, fuse) = if want.iter().any(|w| w == "storage") {
+    let (store, fuse, mp) = if want.iter().any(|w| w == "storage") {
         let r = crate::storage::Remote::new(out_tx.clone());
         let r2 = r.clone();
-        match tokio::task::spawn_blocking(move || crate::storage::mount(r2)).await? {
+        let mp = crate::storage::mount_point(slot, &device);
+        let mp2 = mp.clone();
+        match tokio::task::spawn_blocking(move || crate::storage::mount(r2, &mp2)).await? {
             Ok(f) => {
-                log("almacén: montado en ~/Móvil");
-                (Some(r), Some(f))
+                log(&format!("almacén: montado en {}", mp.display()));
+                with_sess(slot, |x| x.storage = Some(mp.to_string_lossy().into_owned()));
+                write_status();
+                (Some(r), Some(f), Some(mp))
             }
             Err(e) => {
                 log(&format!("almacén: no se pudo montar ({e})"));
-                (None, None)
+                (None, None, None)
             }
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let res: Res<()> = loop {
@@ -710,21 +896,21 @@ async fn session(
                     "info" => {
                         let mut m = m.clone();
                         m.as_object_mut().map(|o| o.remove("t"));
-                        st().phone = Some(m);
+                        with_sess(slot, |x| x.phone = Some(m));
                         write_status();
                     }
                     "standby_off" => {
-                        st().standby = false;
+                        with_sess(slot, |x| x.standby = false);
                         write_status();
                     }
                     // botones del menú de la app (igual que los de la barra)
                     "media_set" => {
                         if let Some(on) = m["mic"].as_bool() {
-                            tokio::spawn(set_mic(on));
+                            tokio::spawn(set_mic(slot, on));
                         }
                         let flip = m["facing"].is_string();
                         if m["cam"].is_boolean() || flip {
-                            set_cam(m["cam"].as_bool(), flip);
+                            set_cam(slot, m["cam"].as_bool(), flip);
                         }
                         // encendida a mano: el panel enseña lo que ve la cámara
                         #[cfg(target_os = "linux")]
@@ -734,24 +920,29 @@ async fn session(
                     }
                     "cam_rot" => {
                         #[cfg(target_os = "linux")]
-                        crate::devices::set_rot(m["deg"].as_i64().unwrap_or(0) as i32);
+                        crate::devices::set_rot(slot, m["deg"].as_i64().unwrap_or(0) as i32);
                     }
                     "standby_set" => {
                         let on = m["on"].as_bool().unwrap_or(false);
                         let _ = out_tx.send((0, json!({"t": "standby", "on": on}).to_string().into_bytes()));
-                        st().standby = on;
+                        with_sess(slot, |x| x.standby = on);
                         write_status();
                     }
                     "mic_state" => {
-                        log(&format!("micrófono del móvil: {m}"));
-                        let mut s = st();
-                        s.mic_ok = m["on"].as_bool().unwrap_or(false);
-                        s.media_error = m["why"].as_str().unwrap_or("").to_string();
+                        log(&format!("micrófono del móvil {slot}: {m}"));
+                        with_sess(slot, |x| {
+                            x.mic_ok = m["on"].as_bool().unwrap_or(false);
+                            x.media_error = m["why"].as_str().unwrap_or("").to_string();
+                        });
+                        write_status();
                     }
                     "cam_state" => {
-                        let mut s = st();
-                        s.cam_ok = m["camOk"].as_bool().unwrap_or(false);
-                        s.media_error = m["error"].as_str().unwrap_or("").to_string();
+                        with_sess(slot, |x| {
+                            x.cam_ok = m["camOk"].as_bool().unwrap_or(false);
+                            let e = m["error"].as_str().unwrap_or("").to_string();
+                            x.media_error = if e.is_empty() { x.cam_unavailable.clone().filter(|_| x.cam_on).unwrap_or_default() } else { e };
+                        });
+                        write_status();
                     }
                     other => crate::dbg_log!("control sin tratar: {other} {m}"),
                 }
@@ -764,15 +955,15 @@ async fn session(
             }
             3 => {
                 #[cfg(target_os = "linux")]
-                if let Some(mic) = st().mic.as_mut() {
+                if let Some(mic) = st().sessions.get_mut(&slot).and_then(|x| x.mic.as_mut()) {
                     mic.write(body);
                 }
             }
             4 => {
                 // cámara del móvil (H.264): solo si está pedida
                 #[cfg(target_os = "linux")]
-                if st().cam_on {
-                    crate::devices::feed(body);
+                if st().sessions.get(&slot).map(|x| x.cam_on).unwrap_or(false) {
+                    crate::devices::feed(slot, body);
                 }
             }
             1 => {
@@ -790,33 +981,36 @@ async fn session(
     drop(screen_in);
     #[cfg(target_os = "linux")]
     {
-        let mic = st().mic.take();
+        let mic = st().sessions.get_mut(&slot).and_then(|x| x.mic.take());
         let had_store = fuse.is_some();
         let _ = tokio::task::spawn_blocking(move || {
             drop(mic);
             drop(speakers);
-            if fuse.is_some() {
-                crate::storage::unmount();
-                drop(fuse);
+            if let (Some(f), Some(mp)) = (fuse, mp.as_ref()) {
+                crate::storage::unmount(mp);
+                drop(f);
             }
+            crate::devices::close_slot(slot);
+            crate::audio::remove_mic_source(slot);
         })
         .await;
         drop(store);
         if had_store {
-            log("almacén: desmontado");
+            log(&format!("almacén del móvil {slot}: desmontado"));
         }
-        let mut s = st();
-        s.mic_on = false;
-        s.mic_ok = false;
-        s.cam_on = false;
-        s.cam_ok = false;
-        s.media_error.clear();
-        crate::devices::cam_off();
+        with_sess(slot, |x| {
+            x.mic_on = false;
+            x.mic_ok = false;
+            x.cam_on = false;
+            x.cam_ok = false;
+            x.media_error.clear();
+        });
     }
     drop(out_tx);
-    st().ctl = None;
+    with_sess(slot, |x| x.ctl = None);
     writer.abort();
-    drop(display); // al soltar el último Arc se quita el monitor virtual
+    // al soltar el último Arc se quita el monitor virtual (fuera del hilo de tokio: llama a hyprctl)
+    let _ = tokio::task::spawn_blocking(move || drop(display)).await;
     res
 }
 
@@ -840,28 +1034,32 @@ fn screen_size(hello: &Value) -> (u32, u32) {
 
 // ───────────── Cable (adb reverse) ─────────────
 
+/// Cada móvil enchufado por USB (con depuración USB) llega a este equipo por el cable: adb reverse.
+/// Con varios móviles enchufados `adb get-state` falla ("more than one device"): se va uno a uno.
 async fn adb_watch(port: u16) {
+    let mut done: std::collections::HashSet<String> = Default::default();
     loop {
-        let found = tokio::process::Command::new("adb").arg("get-state").output().await;
-        match found {
-            Err(_) => {
-                tokio::time::sleep(Duration::from_secs(30)).await; // adb no está: se vuelve a mirar de vez en cuando
-                continue;
-            }
-            Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "device" => {
-                if let Ok(l) = tokio::process::Command::new("adb").args(["reverse", "--list"]).output().await {
-                    if !String::from_utf8_lossy(&l.stdout).contains(&format!("tcp:{port}")) {
-                        let r = tokio::process::Command::new("adb")
-                            .args(["reverse", &format!("tcp:{port}"), &format!("tcp:{port}")])
-                            .output()
-                            .await;
-                        if matches!(&r, Ok(o) if o.status.success()) {
-                            log("cable: adb reverse activo");
-                        }
-                    }
+        let found = tokio::process::Command::new("adb").arg("devices").output().await;
+        let Ok(o) = found else {
+            tokio::time::sleep(Duration::from_secs(30)).await; // adb no está: se vuelve a mirar de vez en cuando
+            continue;
+        };
+        let serials: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().skip(1)
+            .filter_map(|l| l.split_once('\t').filter(|(_, st)| st.trim() == "device").map(|(s, _)| s.to_string()))
+            .collect();
+        done.retain(|s| serials.contains(s));
+        for serial in serials {
+            let l = tokio::process::Command::new("adb").args(["-s", &serial, "reverse", "--list"]).output().await;
+            let has = matches!(&l, Ok(o) if String::from_utf8_lossy(&o.stdout).contains(&format!("tcp:{port}")));
+            if !has {
+                let r = tokio::process::Command::new("adb")
+                    .args(["-s", &serial, "reverse", &format!("tcp:{port}"), &format!("tcp:{port}")])
+                    .output()
+                    .await;
+                if matches!(&r, Ok(o) if o.status.success()) && done.insert(serial.clone()) {
+                    log(&format!("cable: adb reverse activo ({serial})"));
                 }
             }
-            Ok(_) => {}
         }
         tokio::time::sleep(Duration::from_secs(4)).await;
     }
@@ -875,11 +1073,11 @@ fn cleanup() {
     {
         crate::linux::ensure_env();
         if crate::linux::is_hyprland() {
-            crate::linux::remove_monitor();
+            crate::linux::remove_all_monitors();
         }
         crate::audio::cleanup();
         crate::devices::start();
-        crate::storage::unmount();
+        crate::storage::unmount_all();
     }
 }
 
@@ -941,18 +1139,25 @@ pub async fn run() -> Res<()> {
             }
         });
     }
-    // al parar: se corta la sesión y se limpia
-    let kick = st().kick.clone();
-    if let Some(k) = kick {
-        k.notify_waiters();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    // al parar: se cortan las sesiones y se limpia
+    let kicks: Vec<Arc<Notify>> = st().sessions.values().filter_map(|x| x.kick.clone()).collect();
+    if !kicks.is_empty() {
+        for k in kicks {
+            k.notify_waiters();
+        }
+        for _ in 0..30 {
+            if st().sessions.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
     tokio::task::spawn_blocking(cleanup).await?;
     log("parado");
     {
         let mut s = st();
-        s.peer = None;
-        s.pending = None;
+        s.sessions.clear();
+        s.pendings.clear();
     }
     write_status();
     Ok(())

@@ -1,10 +1,12 @@
 //! Linux: altavoces del móvil (canal 2) y micrófono del móvil (canal 3) con PipeWire/PulseAudio.
 //! Solo usa `pactl` y `parec` (vienen con pipewire-pulse / pulseaudio-utils).
 //!
-//! · Crea la salida "Altavoces del móvil" (null-sink) y manda su monitor al móvil: PCM 48 kHz,
-//!   s16le, estéreo, bloques de 10 ms (el formato que reproduce la app).
-//! · Las ventanas que están en el monitor MOVIL suenan en el móvil; al volver al PC, a la salida normal.
-//! · Micrófono: fuente "Micrófono del móvil" (module-pipe-source) alimentada con lo que llega por el canal 3.
+//! · Crea una salida "Altavoces de <móvil>" (null-sink) por móvil y manda su monitor a ese móvil:
+//!   PCM 48 kHz, s16le, estéreo, bloques de 10 ms (el formato que reproduce la app).
+//! · Las ventanas que están en el monitor de un móvil (MOVIL, MOVIL-2…) suenan en ese móvil; al volver
+//!   al PC, a la salida normal. Un solo enrutador para todos los móviles (si no, se pelearían).
+//! · Micrófono: fuente "Micrófono del móvil" (module-pipe-source) alimentada con lo que llega por el canal 3;
+//!   la del 1º siempre existe, la de los demás ("Micrófono de <móvil>") mientras están conectados.
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -16,7 +18,30 @@ use tokio::sync::mpsc::UnboundedSender;
 
 const SINK: &str = "movil_altavoces";
 const MIC: &str = "movil_microfono";
-const MONITOR: &str = "MOVIL";
+
+/// Salida de sonido de la ranura `s` (movil_altavoces, movil_altavoces_2…)
+pub fn sink_name(s: u8) -> String {
+    if s <= 1 { SINK.into() } else { format!("{SINK}_{s}") }
+}
+
+/// Fuente (micrófono) de la ranura `s` (movil_microfono, movil_microfono_2…)
+pub fn mic_name(s: u8) -> String {
+    if s <= 1 { MIC.into() } else { format!("{MIC}_{s}") }
+}
+
+fn mic_fifo(s: u8) -> String {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    if s <= 1 { format!("{dir}/movil-mic.fifo") } else { format!("{dir}/movil-mic-{s}.fifo") }
+}
+
+fn is_phone_sink(name: &str) -> bool {
+    name == SINK || name.strip_prefix(SINK).and_then(|r| r.strip_prefix('_')).map(|r| r.parse::<u8>().is_ok()).unwrap_or(false)
+}
+
+/// Texto para pactl: comillas dobles del nombre fuera (rompen sink_properties)
+fn label(device: &str) -> String {
+    device.chars().filter(|c| *c != '"' && *c != '\\' && !c.is_control()).collect()
+}
 const CHUNK: usize = 48000 * 2 * 2 / 100;
 
 fn sh(args: &[&str]) -> String {
@@ -59,15 +84,15 @@ fn find_module(needle: &str) -> Option<u32> {
 fn guard_default() {
     let file = crate::util::state_dir().join("salida-normal");
     let cur = sh(&["pactl", "get-default-sink"]).trim().to_string();
-    if !cur.is_empty() && cur != SINK {
+    if !cur.is_empty() && !is_phone_sink(&cur) {
         let _ = std::fs::write(&file, &cur);
         return;
     }
-    if cur != SINK {
+    if !is_phone_sink(&cur) {
         return;
     }
     let sinks: Vec<String> = json(&["pactl", "-f", "json", "list", "sinks"]).iter()
-        .filter_map(|s| s["name"].as_str().map(String::from)).filter(|n| n != SINK).collect();
+        .filter_map(|s| s["name"].as_str().map(String::from)).filter(|n| !is_phone_sink(n)).collect();
     let saved = std::fs::read_to_string(&file).ok().map(|s| s.trim().to_string()).filter(|s| sinks.contains(s));
     if let Some(normal) = saved.or_else(|| sinks.first().cloned()) {
         sh(&["pactl", "set-default-sink", &normal]);
@@ -76,39 +101,58 @@ fn guard_default() {
 }
 
 pub struct Speakers {
+    slot: u8,
+    sink: String,
     module: Option<u32>,
     task: tokio::task::JoinHandle<()>,
 }
 
+/// Monitores de móvil con su salida de sonido (lo que usa el enrutador)
+static ROUTES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+static ROUTER: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+
 impl Speakers {
-    pub fn start(out: UnboundedSender<(u8, Vec<u8>)>) -> Option<Self> {
+    pub fn start(out: UnboundedSender<(u8, Vec<u8>)>, slot: u8, device: &str) -> Option<Self> {
         if !available() {
             crate::host::log("sonido: faltan pactl/parec");
             return None;
         }
-        let module = find_module(&format!("sink_name={SINK}")).or_else(|| {
-            load_module(&["module-null-sink", &format!("sink_name={SINK}"), "sink_properties=\"device.description=\\\"Altavoces del móvil\\\"\""])
+        let sink = sink_name(slot);
+        let module = module_with(&format!("sink_name={sink}")).or_else(|| {
+            load_module(&["module-null-sink", &format!("sink_name={sink}"),
+                          &format!("sink_properties=\"device.description=\\\"Altavoces de {}\\\"\"", label(device))])
         });
         // WirePlumber puede ponerla por defecto al aparecer (si la recordaba): se corrige
         std::thread::sleep(std::time::Duration::from_millis(700));
         guard_default();
-        let task = tokio::spawn(async move {
-            let cap = tokio::spawn(capture(out));
-            router().await;
-            cap.abort();
-        });
-        Some(Speakers { module, task })
+        let task = tokio::spawn(capture(out, sink.clone()));
+        ROUTES.lock().unwrap().push((crate::util::output_name(slot), sink.clone()));
+        let mut r = ROUTER.lock().unwrap();
+        if r.as_ref().map(|t| t.is_finished()).unwrap_or(true) {
+            *r = Some(tokio::spawn(router()));
+        }
+        Some(Speakers { slot, sink, module, task })
     }
 }
 
 impl Drop for Speakers {
     fn drop(&mut self) {
         self.task.abort();
+        {
+            let mut routes = ROUTES.lock().unwrap();
+            let out = crate::util::output_name(self.slot);
+            routes.retain(|r| r.0 != out);
+            if routes.is_empty() {
+                if let Some(t) = ROUTER.lock().unwrap().take() {
+                    t.abort();
+                }
+            }
+        }
         guard_default();
-        // devuelve a la salida normal lo que sonaba en el móvil y quita la salida
+        // devuelve a la salida normal lo que sonaba en este móvil y quita la salida
         let sink_idx: HashSet<u64> = json(&["pactl", "-f", "json", "list", "sinks"])
             .iter()
-            .filter(|s| s["name"] == SINK)
+            .filter(|s| s["name"].as_str() == Some(self.sink.as_str()))
             .filter_map(|s| s["index"].as_u64())
             .collect();
         for si in json(&["pactl", "-f", "json", "list", "sink-inputs"]) {
@@ -122,10 +166,10 @@ impl Drop for Speakers {
     }
 }
 
-async fn capture(out: UnboundedSender<(u8, Vec<u8>)>) {
+async fn capture(out: UnboundedSender<(u8, Vec<u8>)>, sink: String) {
     loop {
         let child = tokio::process::Command::new("parec")
-            .args(["-d", &format!("{SINK}.monitor"), "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=10", "--raw"])
+            .args(["-d", &format!("{sink}.monitor"), "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=10", "--raw"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
@@ -172,7 +216,7 @@ fn ancestors(mut pid: u64) -> Vec<u64> {
     v
 }
 
-/// Cada 1,5 s: el sonido de las ventanas del monitor del móvil va al móvil.
+/// Cada 1,5 s: el sonido de las ventanas del monitor de cada móvil va a ese móvil.
 async fn router() {
     let moved = Arc::new(Mutex::new(HashSet::<u64>::new()));
     loop {
@@ -183,12 +227,35 @@ async fn router() {
 }
 
 fn route_once(moved: &mut HashSet<u64>) {
-    let mon_id = json(&["hyprctl", "monitors", "-j"]).iter().find(|m| m["name"] == MONITOR).and_then(|m| m["id"].as_i64());
+    let routes = ROUTES.lock().unwrap().clone();
+    if routes.is_empty() {
+        return;
+    }
+    // id de monitor → salida de sonido del móvil (solo los monitores de móvil)
+    let mon_sink: HashMap<i64, String> = json(&["hyprctl", "monitors", "-j"]).iter()
+        .filter_map(|m| {
+            let name = m["name"].as_str()?;
+            let sink = routes.iter().find(|r| r.0 == name)?.1.clone();
+            Some((m["id"].as_i64()?, sink))
+        })
+        .collect();
     let wins: Vec<Value> = json(&["hyprctl", "clients", "-j"]).into_iter().filter(|c| c["pid"].as_i64().unwrap_or(0) > 0).collect();
-    let pids: HashSet<u64> = wins.iter().filter(|c| mon_id.is_some() && c["monitor"].as_i64() == mon_id).filter_map(|c| c["pid"].as_u64()).collect();
-    let all: HashSet<u64> = wins.iter().filter_map(|c| c["pid"].as_u64()).collect();
-    let elsewhere: HashSet<u64> = all.difference(&pids).copied().collect();
-    let Some(target) = json(&["pactl", "-f", "json", "list", "sinks"]).iter().find(|s| s["name"] == SINK).and_then(|s| s["index"].as_u64()) else { return };
+    // pid → salida del móvil donde tiene ventana (o ninguna = en el PC)
+    let mut on_phone: HashMap<u64, String> = HashMap::new();
+    let mut on_pc: HashSet<u64> = HashSet::new();
+    for c in &wins {
+        let Some(pid) = c["pid"].as_u64() else { continue };
+        match c["monitor"].as_i64().and_then(|m| mon_sink.get(&m)) {
+            Some(sink) => {
+                on_phone.entry(pid).or_insert_with(|| sink.clone());
+            }
+            None => {
+                on_pc.insert(pid);
+            }
+        }
+    }
+    let sinks = json(&["pactl", "-f", "json", "list", "sinks"]);
+    let sink_by_idx: HashMap<u64, String> = sinks.iter().filter_map(|s| Some((s["index"].as_u64()?, s["name"].as_str()?.to_string()))).collect();
     let cpid: HashMap<u64, u64> = json(&["pactl", "-f", "json", "list", "clients"])
         .iter()
         .filter_map(|c| Some((c["index"].as_u64()?, c["properties"]["application.process.id"].as_str()?.parse().ok()?)))
@@ -196,16 +263,22 @@ fn route_once(moved: &mut HashSet<u64>) {
     let inputs = json(&["pactl", "-f", "json", "list", "sink-inputs"]);
     for si in &inputs {
         let (Some(idx), Some(sink)) = (si["index"].as_u64(), si["sink"].as_u64()) else { continue };
+        let cur = sink_by_idx.get(&sink).cloned().unwrap_or_default();
         let pid = si["properties"]["application.process.id"].as_str().and_then(|p| p.parse().ok()).or_else(|| si["client"].as_u64().and_then(|c| cpid.get(&c).copied())).unwrap_or(0);
         let anc = if pid > 0 { ancestors(pid) } else { vec![] };
-        let on_phone = anc.iter().any(|p| pids.contains(p));
-        let on_pc = !on_phone && anc.iter().any(|p| elsewhere.contains(p));
-        if on_phone && sink != target {
-            sh(&["pactl", "move-sink-input", &idx.to_string(), SINK]);
-            moved.insert(idx);
-        } else if sink == target && (on_pc || (moved.contains(&idx) && !on_phone)) {
-            sh(&["pactl", "move-sink-input", &idx.to_string(), "@DEFAULT_SINK@"]);
-            moved.remove(&idx);
+        // el antepasado más cercano con ventana decide
+        let target = anc.iter().find_map(|p| on_phone.get(p).cloned());
+        let pc = target.is_none() && anc.iter().any(|p| on_pc.contains(p));
+        match target {
+            Some(t) if t != cur => {
+                sh(&["pactl", "move-sink-input", &idx.to_string(), &t]);
+                moved.insert(idx);
+            }
+            None if is_phone_sink(&cur) && (pc || moved.contains(&idx)) => {
+                sh(&["pactl", "move-sink-input", &idx.to_string(), "@DEFAULT_SINK@"]);
+                moved.remove(&idx);
+            }
+            _ => {}
         }
     }
     let live: HashSet<u64> = inputs.iter().filter_map(|s| s["index"].as_u64()).collect();
@@ -219,26 +292,41 @@ pub struct Mic {
     fifo: Option<std::fs::File>,
 }
 
+fn load_mic(slot: u8, description: &str) -> Option<u32> {
+    load_module(&[
+        "module-pipe-source",
+        &format!("source_name={}", mic_name(slot)),
+        &format!("file={}", mic_fifo(slot)),
+        "format=s16le",
+        "rate=48000",
+        "channels=1",
+        &format!("source_properties=\"device.description=\\\"{}\\\"\"", label(description)),
+    ])
+}
+
+fn mic_module(slot: u8) -> Option<u32> {
+    module_with(&format!("source_name={}", mic_name(slot)))
+}
+
+/// Módulo con ese argumento exacto ("source_name=movil_microfono" también está dentro de
+/// "source_name=movil_microfono_2": se compara la palabra entera)
+fn module_with(arg: &str) -> Option<u32> {
+    sh(&["pactl", "list", "short", "modules"]).lines()
+        .find(|l| l.split_whitespace().any(|w| w == arg))
+        .and_then(|l| l.split_whitespace().next()?.parse().ok())
+}
+
 impl Mic {
-    pub fn start() -> Option<Self> {
+    pub fn start(slot: u8, device: &str) -> Option<Self> {
         if !available() {
             return None;
         }
-        let path = format!("{}/movil-mic.fifo", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
-        // la fuente la crea devices al arrancar y se queda siempre (para que Meet/Discord la vean):
+        // la fuente del 1º la crea devices al arrancar y se queda siempre (para que Meet/Discord la vean):
         // si ya está no es "nuestra" y no se quita al apagar el micro
-        let module = if find_module(&format!("source_name={MIC}")).is_some() { None } else { load_module(&[
-                "module-pipe-source",
-                &format!("source_name={MIC}"),
-                &format!("file={path}"),
-                "format=s16le",
-                "rate=48000",
-                "channels=1",
-                "source_properties=\"device.description=\\\"Micrófono del móvil\\\"\"",
-            ]) };
+        let module = if mic_module(slot).is_some() { None } else { load_mic(slot, &format!("Micrófono de {device}")) };
         let fifo = {
             use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&path).ok()
+            std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(mic_fifo(slot)).ok()
         };
         Some(Mic { module, fifo })
     }
@@ -259,30 +347,38 @@ impl Drop for Mic {
     }
 }
 
-/// La fuente "Micrófono del móvil" siempre presente (sin móvil da silencio)
+/// La fuente "Micrófono del móvil" (ranura 1) siempre presente (sin móvil da silencio)
 pub fn ensure_mic_source() {
-    if !available() || find_module(&format!("source_name={MIC}")).is_some() {
+    if !available() || mic_module(1).is_some() {
         return;
     }
-    let path = format!("{}/movil-mic.fifo", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
-    load_module(&[
-        "module-pipe-source",
-        &format!("source_name={MIC}"),
-        &format!("file={path}"),
-        "format=s16le",
-        "rate=48000",
-        "channels=1",
-        "source_properties=\"device.description=\\\"Micrófono del móvil\\\"\"",
-    ]);
+    load_mic(1, "Micrófono del móvil");
 }
 
-/// ¿Alguna app graba del micrófono del móvil? (sin contar medidores de nivel)
-pub fn mic_in_use() -> bool {
+/// Micrófono de la ranura `slot` (≥2) creado ya al conectar ese móvil, para que Meet lo vea en la lista
+/// aunque aún no se haya encendido; se quita al desconectar (`remove_mic_source`)
+pub fn add_mic_source(slot: u8, device: &str) {
+    if slot > 1 && available() && mic_module(slot).is_none() {
+        load_mic(slot, &format!("Micrófono de {device}"));
+    }
+}
+
+pub fn remove_mic_source(slot: u8) {
+    if slot > 1 {
+        while let Some(m) = mic_module(slot) {
+            sh(&["pactl", "unload-module", &m.to_string()]);
+        }
+    }
+}
+
+/// ¿Alguna app graba del micrófono de la ranura `slot`? (sin contar medidores de nivel)
+pub fn mic_in_use(slot: u8) -> bool {
     if !available() {
         return false;
     }
+    let name = mic_name(slot);
     let srcs: HashSet<u64> = json(&["pactl", "-f", "json", "list", "sources"]).iter()
-        .filter(|s| s["name"] == MIC).filter_map(|s| s["index"].as_u64()).collect();
+        .filter(|s| s["name"].as_str() == Some(name.as_str())).filter_map(|s| s["index"].as_u64()).collect();
     !srcs.is_empty() && json(&["pactl", "-f", "json", "list", "source-outputs"]).iter().any(|o| {
         let p = &o["properties"];
         o["source"].as_u64().map(|s| srcs.contains(&s)).unwrap_or(false)
@@ -296,6 +392,7 @@ pub fn cleanup() {
     if !available() {
         return;
     }
+    // todas las de móviles (movil_altavoces, movil_altavoces_2…, movil_microfono…)
     for name in [format!("sink_name={SINK}"), format!("source_name={MIC}")] {
         while let Some(m) = find_module(&name) {
             sh(&["pactl", "unload-module", &m.to_string()]);

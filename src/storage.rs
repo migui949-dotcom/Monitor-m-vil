@@ -18,8 +18,46 @@ use tokio::sync::mpsc::UnboundedSender;
 const CHUNK: usize = 56 * 1024;
 const TTL: Duration = Duration::from_secs(1);
 
-pub fn mount_point() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("Móvil")
+/// Carpeta del almacén de la ranura `slot`: ~/Móvil para el 1º y "~/Móvil (<nombre del móvil>)"
+/// para los demás (si ya hay otro con ese nombre montado, se añade el número de ranura)
+pub fn mount_point(slot: u8, device: &str) -> PathBuf {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+    if slot <= 1 {
+        return home.join("Móvil");
+    }
+    let clean: String = device.chars().map(|c| if c == '/' || c.is_control() { '-' } else { c }).collect();
+    let p = home.join(format!("Móvil ({})", clean.trim()));
+    if mounted().contains(&p) {
+        return home.join(format!("Móvil ({} {slot})", clean.trim()));
+    }
+    p
+}
+
+/// Carpetas montadas ahora mismo por este programa (sistema de archivos "movil")
+fn mounted() -> Vec<PathBuf> {
+    std::fs::read_to_string("/proc/self/mounts").unwrap_or_default().lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(' ').collect();
+            (f.len() > 2 && f[0] == "movil" && f[2].starts_with("fuse")).then(|| PathBuf::from(unescape(f[1])))
+        })
+        .collect()
+}
+
+/// /proc/mounts escribe espacios y similares como \040
+fn unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+            out.push(u8::from_str_radix(&s[i + 1..i + 4], 8).unwrap_or(b'?'));
+            i += 4;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Lado de la sesión: manda peticiones al móvil y empareja respuestas por id.
@@ -452,14 +490,30 @@ impl Filesystem for MovilFs {
     }
 }
 
-pub fn unmount() {
-    let _ = std::process::Command::new("fusermount3").arg("-uz").arg(mount_point()).stderr(std::process::Stdio::null()).status();
+pub fn unmount(mp: &std::path::Path) {
+    let _ = std::process::Command::new("fusermount3").arg("-uz").arg(mp).stderr(std::process::Stdio::null()).status();
+    // las carpetas "~/Móvil (…)" de los demás móviles no se dejan vacías por ahí
+    if mp.file_name().map(|n| n.to_string_lossy().starts_with("Móvil (")).unwrap_or(false) {
+        let _ = std::fs::remove_dir(mp);
+    }
 }
 
-/// Monta ~/Móvil en segundo plano; se desmonta al soltar el valor devuelto.
-pub fn mount(remote: Arc<Remote>) -> Result<fuser::BackgroundSession, String> {
-    unmount(); // por si quedó algo de una sesión anterior
-    let mp = mount_point();
+/// Al arrancar: desmonta lo que quedara de sesiones anteriores (cierre brusco)
+pub fn unmount_all() {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+    let mut list = mounted();
+    if !list.contains(&home.join("Móvil")) {
+        list.push(home.join("Móvil")); // montaje roto ("Transport endpoint is not connected") no sale en la lista
+    }
+    for mp in list {
+        unmount(&mp);
+    }
+}
+
+/// Monta el almacén del móvil en `mp` en segundo plano; se desmonta al soltar el valor devuelto.
+pub fn mount(remote: Arc<Remote>, mp: &std::path::Path) -> Result<fuser::BackgroundSession, String> {
+    unmount(mp); // por si quedó algo de una sesión anterior
+    let mp = mp.to_path_buf();
     std::fs::create_dir_all(&mp).map_err(|e| e.to_string())?;
     let mut fs = MovilFs { r: remote, paths: HashMap::new(), inos: HashMap::new(), next: 2, uid: unsafe { libc::getuid() }, gid: unsafe { libc::getgid() }, pending: None, cache: None };
     fs.inos.insert("/".into(), 1);

@@ -90,3 +90,50 @@ pub fn debug() -> bool {
 macro_rules! dbg_log {
     ($($a:tt)*) => { if $crate::util::debug() { eprintln!("[pantalla] {}", format!($($a)*)); } };
 }
+
+// ───────────── Varios móviles a la vez: una "ranura" (1..=MAX_PHONES) por móvil conectado ─────────────
+// La ranura 1 conserva los nombres de siempre (monitor MOVIL, ~/Móvil, /dev/video42…), así lo que ya
+// estaba configurado para un móvil sigue valiendo; las demás llevan el número (MOVIL-2…).
+
+pub const MAX_PHONES: u8 = 4;
+
+/// Nombre de la salida (monitor virtual) de la ranura `s`
+pub fn output_name(s: u8) -> String {
+    if s <= 1 { "MOVIL".into() } else { format!("MOVIL-{s}") }
+}
+
+/// ¿Es el monitor de algún móvil? (MOVIL, MOVIL-2…; en KWin "Virtual-MOVIL…")
+pub fn is_phone_output(name: &str) -> bool {
+    let n = name.strip_prefix("Virtual-").unwrap_or(name);
+    n == "MOVIL" || n.strip_prefix("MOVIL-").map(|r| r.parse::<u8>().is_ok()).unwrap_or(false)
+}
+
+/// Clave de host.conf con la posición del monitor de la ranura `s` (POSITION, POSITION_2…)
+pub fn position_key(s: u8) -> String {
+    if s <= 1 { "POSITION".into() } else { format!("POSITION_{s}") }
+}
+
+/// Posición del monitor de la ranura `s`. Por defecto el 2º móvil va al lado contrario del 1º
+/// (con el 1º a la izquierda, el 2º a la derecha) y los demás junto al 1º.
+pub fn position(s: u8) -> String {
+    if let Some(p) = conf(&position_key(s)) {
+        return p;
+    }
+    let first = conf("POSITION").unwrap_or_else(|| "auto-right".into());
+    if s == 2 {
+        return match first.as_str() {
+            "auto-left" => "auto-right",
+            "auto-up" => "auto-down",
+            "auto-down" => "auto-up",
+            _ => "auto-left",
+        }
+        .into();
+    }
+    first
+}
+
+/// Escritorio (workspace) propio del monitor de la ranura `s`: PHONE_WS (11 por defecto) + 10 por ranura
+pub fn phone_workspace(s: u8) -> i64 {
+    let base = conf("PHONE_WS").and_then(|v| v.parse::<i64>().ok()).unwrap_or(11);
+    base + (s.max(1) as i64 - 1) * 10
+}

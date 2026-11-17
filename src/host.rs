@@ -616,6 +616,22 @@ async fn session(
                         st().standby = false;
                         write_status();
                     }
+                    // botones del menú de la app (igual que los de la barra)
+                    "media_set" => {
+                        if let Some(on) = m["mic"].as_bool() {
+                            tokio::spawn(set_mic(on));
+                        }
+                        if m["cam"].as_bool() == Some(true) || m["facing"].is_string() {
+                            let _ = out_tx.send((0, json!({"t": "aviso", "text": "La cámara aún no funciona con este ordenador (pantalla-host)"})
+                                .to_string().into_bytes()));
+                        }
+                    }
+                    "standby_set" => {
+                        let on = m["on"].as_bool().unwrap_or(false);
+                        let _ = out_tx.send((0, json!({"t": "standby", "on": on}).to_string().into_bytes()));
+                        st().standby = on;
+                        write_status();
+                    }
                     "mic_state" => {
                         log(&format!("micrófono del móvil: {m}"));
                         let mut s = st();

@@ -75,6 +75,10 @@ impl App {
             sb: serde_json::Value::Null,
             disconnect: false,
             screen_error: None,
+            cam_on: false,
+            mic_on: false,
+            facing: "user".into(),
+            aviso: None,
         }));
         net::discovery(state.clone());
         let ident = Arc::new(Identity::load(data_dir.clone()));
@@ -272,6 +276,53 @@ fn big(text: impl Into<String>, size: f32, color: egui::Color32) -> egui::RichTe
 }
 
 impl App {
+    /// Botones de cámara, micrófono y stand-by: se piden al equipo, que monta su parte
+    /// (cámara virtual / micrófono virtual) y contesta con el estado real.
+    fn media_controls(&mut self, ui: &mut egui::Ui, link: &Arc<link::Link>, width: f32) {
+        let (cam, mic, sb, facing) = {
+            let st = self.state.lock().unwrap();
+            (st.cam_on, st.mic_on, st.standby, st.facing.clone())
+        };
+        let btn = |t: String, on: bool| egui::Button::new(big(t, 18.0, if on { theme::BG } else { theme::FG }))
+            .fill(if on { theme::GREEN } else { theme::SURFACE }).corner_radius(14.0).min_size(egui::vec2(width, 52.0));
+        ui.horizontal(|ui| {
+            if ui.add(btn(format!("\u{F0100}  Cámara {}", if cam { "encendida" } else { "apagada" }), cam)).clicked() {
+                let _ = link.send_json(serde_json::json!({"t": "media_set", "cam": !cam}));
+            }
+            let flip = egui::Button::new(big(format!("\u{F0450}  {}", if facing == "environment" { "Trasera" } else { "Delantera" }), 18.0, theme::FG))
+                .fill(theme::SURFACE).corner_radius(14.0).min_size(egui::vec2(width * 0.6, 52.0));
+            if ui.add(flip).clicked() {
+                let _ = link.send_json(serde_json::json!({"t": "media_set", "facing": "flip"}));
+            }
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add(btn(format!("\u{F036C}  Micrófono {}", if mic { "encendido" } else { "apagado" }), mic)).clicked() {
+                let _ = link.send_json(serde_json::json!({"t": "media_set", "mic": !mic}));
+            }
+            let s = egui::Button::new(big("\u{F0594}  Stand-by", 18.0, if sb { theme::BG } else { theme::FG }))
+                .fill(if sb { theme::BLUE } else { theme::SURFACE }).corner_radius(14.0).min_size(egui::vec2(width * 0.6, 52.0));
+            if ui.add(s).clicked() {
+                let _ = link.send_json(serde_json::json!({"t": "standby_set", "on": !sb}));
+                self.menu = false;
+            }
+        });
+    }
+
+    /// Aviso corto del equipo (p. ej. "la cámara aún no funciona aquí"), 5 s abajo
+    fn aviso_ui(&mut self, ctx: &egui::Context) {
+        let a = self.state.lock().unwrap().aviso.clone();
+        if let Some((t, at)) = a {
+            if at.elapsed() > Duration::from_secs(5) { self.state.lock().unwrap().aviso = None; return; }
+            egui::Area::new(egui::Id::new("aviso")).anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -40.0)).show(ctx, |ui| {
+                egui::Frame::new().fill(theme::SURFACE).corner_radius(14.0).inner_margin(14.0).show(ui, |ui| {
+                    ui.label(big(t, 18.0, theme::YELLOW));
+                });
+            });
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+    }
+
     /// Menú de la app sobre el escritorio (se abre con tres dedos)
     fn menu_ui(&mut self, ui: &mut egui::Ui, link: &Arc<link::Link>) {
         egui::Area::new(egui::Id::new("menu")).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -287,7 +338,9 @@ impl App {
                             link.close();
                             self.menu = false;
                         }
-                        ui.add_space(10.0);
+                        ui.add_space(16.0);
+                        self.media_controls(ui, link, 300.0);
+                        ui.add_space(16.0);
                         if ui.add(b("Volver al escritorio", theme::BLUE)).clicked() {
                             self.menu = false;
                             let mut st = self.state.lock().unwrap();
@@ -429,6 +482,7 @@ impl Touch {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.aviso_ui(ui.ctx());
         ui.ctx().request_repaint_after(Duration::from_millis(400));
         let (mut hosts, status, link, video) = {
             let st = self.state.lock().unwrap();
@@ -494,6 +548,13 @@ impl eframe::App for App {
                             if ui.add(b).clicked() {
                                 self.state.lock().unwrap().disconnect = true;
                                 if let Some(l) = &link { l.close(); }
+                            }
+                            if let Some(l) = &link {
+                                ui.add_space(30.0);
+                                ui.scope(|ui| {
+                                    ui.set_max_width(560.0);
+                                    self.media_controls(ui, l, 300.0);
+                                });
                             }
                             return;
                         }

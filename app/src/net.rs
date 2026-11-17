@@ -58,6 +58,12 @@ pub struct Shared {
     pub disconnect: bool,
     /// por qué el ordenador no ha abierto el escritorio (si no lo ha hecho)
     pub screen_error: Option<String>,
+    /// cámara / micrófono tal como los tiene el equipo (para los botones del menú)
+    pub cam_on: bool,
+    pub mic_on: bool,
+    pub facing: String,
+    /// aviso corto para enseñar en pantalla (texto, cuándo)
+    pub aviso: Option<(String, std::time::Instant)>,
 }
 
 pub type State = Arc<Mutex<Shared>>;
@@ -362,7 +368,14 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
         match link.recv(&mut s) {
             Ok((CH_CONTROL, d)) => {
                 let v: Value = serde_json::from_slice(&d).unwrap_or(Value::Null);
-                if v["t"] == "mic" { set_mic(&mic, &link, v["on"].as_bool().unwrap_or(false)); }
+                if v["t"] == "mic" {
+                    let on = v["on"].as_bool().unwrap_or(false);
+                    state.lock().unwrap().mic_on = on;
+                    set_mic(&mic, &link, on);
+                }
+                if v["t"] == "aviso" {
+                    state.lock().unwrap().aviso = Some((v["text"].as_str().unwrap_or("").to_string(), std::time::Instant::now()));
+                }
                 if v["t"] == "brightness" {
                     #[cfg(target_os = "android")]
                     crate::android::set_brightness(v["v"].as_f64().unwrap_or(-1.0) as f32);
@@ -381,8 +394,11 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
                 }
                 if v["t"] == "media" {
                     // estado de media.py (cámara/micro pedidos desde Quickshell) reenviado por movild
-                    set_mic(&mic, &link, v["mic"].as_bool().unwrap_or(false));
-                    set_cam(&cam, &link, v["cam"].as_bool().unwrap_or(false), v["facing"].as_str().unwrap_or("user"));
+                    let (c, m, f) = (v["cam"].as_bool().unwrap_or(false), v["mic"].as_bool().unwrap_or(false),
+                                     v["facing"].as_str().unwrap_or("user").to_string());
+                    { let mut st = state.lock().unwrap(); st.cam_on = c; st.mic_on = m; st.facing = f.clone(); }
+                    set_mic(&mic, &link, m);
+                    set_cam(&cam, &link, c, &f);
                 }
             }
             Ok((CH_SCREEN, d)) => { let _ = rfb_tx.send(d); }
@@ -402,6 +418,8 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
         st.link = None;
         st.video = None;
         st.standby = false;
+        st.cam_on = false;
+        st.mic_on = false;
         if st.dark {
             st.dark = false;
             #[cfg(target_os = "android")]

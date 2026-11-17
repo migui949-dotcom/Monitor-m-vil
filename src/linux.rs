@@ -81,6 +81,16 @@ fn create_monitor(w: u32, h: u32) -> Result<(), String> {
     } else {
         hyprctl(&["keyword", "monitor", &format!("{OUTPUT},{mode},{pos},1")])?;
     }
+    // Escritorio propio (11 por defecto, PHONE_WS en host.conf): Hyprland le da el primer número
+    // libre y entonces Super+3 (por ejemplo) llevaba al móvil y las ventanas acababan allí
+    let ws = crate::util::conf("PHONE_WS").unwrap_or_else(|| "11".into());
+    let prev = hyprctl(&["activeworkspace"]).ok()
+        .and_then(|t| t.split(" on monitor ").nth(1).map(|r| r.split(':').next().unwrap_or("").trim().to_string()));
+    let _ = hyprctl(&["dispatch", "focusmonitor", OUTPUT]);
+    let _ = hyprctl(&["dispatch", "workspace", &ws]);
+    if let Some(p) = prev.filter(|p| !p.is_empty() && p != OUTPUT) {
+        let _ = hyprctl(&["dispatch", "focusmonitor", &p]);
+    }
     Ok(())
 }
 

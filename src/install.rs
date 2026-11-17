@@ -64,6 +64,7 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
     if !run("systemctl", &["--user", "enable", "pantalla-host"]) || !run("systemctl", &["--user", "restart", "pantalla-host"]) {
         return Err("no se pudo activar el servicio de usuario".into());
     }
+    crate::sistema::ask_and_prepare(&dest);
     println!("Instalado: {} (servicio de usuario pantalla-host, arranca con la sesión).", dest.display());
     println!("Panel: \"Escritorio\" en el menú de aplicaciones (se abre solo cuando un móvil pide conectarse).");
     // se abre el panel ahora, si hay sesión gráfica

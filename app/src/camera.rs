@@ -105,11 +105,16 @@ impl Camera {
                 f.set_i32("i-frame-interval", 1);
             };
             let mut codec = None;
-            for (i, extra) in [true, false].into_iter().enumerate() {
+            // 0: todo; 1: sin perfil/nivel/prioridad; 2: sin modo de tasa. El modo CBR es importante:
+            // sin él, el codificador de Qualcomm ignoraba la tasa y mandaba ~110 Mbit/s (atascaba el wifi).
+            for i in 0..3 {
                 let Some(c) = MediaCodec::from_encoder_type("video/avc") else { break };
                 let mut f = MediaFormat::new();
                 base(&mut f);
-                if extra {
+                if i < 2 {
+                    f.set_i32("bitrate-mode", 2);          // BITRATE_MODE_CBR
+                }
+                if i == 0 {
                     f.set_i32("profile", 1);               // Baseline: sin fotogramas B
                     f.set_i32("level", 0x200);             // AVCLevel31 (1280x720@30)
                     f.set_i32("priority", 0);
@@ -173,6 +178,7 @@ impl Camera {
                 std::thread::spawn(move || {
                     let mut config: Vec<u8> = Vec::new();
                     let mut n = 0u64;
+                    let mut behind = false;
                     while !stop.load(Ordering::Relaxed) {
                         match codec.0.dequeue_output_buffer(Duration::from_millis(20)) {
                             Ok(DequeuedOutputBufferInfoResult::Buffer(b)) => {
@@ -183,7 +189,14 @@ impl Camera {
                                 let pkt = if flags & 1 != 0 && !config.is_empty() { [config.as_slice(), &data].concat() } else { data };
                                 if n % 300 == 0 { log::info!("cámara: imagen #{n} ({} bytes)", pkt.len()); }
                                 n += 1;
+                                // si el envío va atascado, se tiran imágenes hasta la siguiente completa
+                                // (clave): mejor saltar que acumular retraso
+                                let key = flags & 1 != 0;
+                                if behind && !key { continue; }
+                                let t0 = std::time::Instant::now();
                                 if link.is_closed() || link.send(CH_CAM, &pkt).is_err() { break; }
+                                behind = t0.elapsed() > Duration::from_millis(60);
+                                if behind { log::warn!("cámara: envío lento ({:?}): se salta hasta la próxima clave", t0.elapsed()); }
                             }
                             Ok(_) => {}
                             Err(e) => { log::warn!("codificador: {e:?}"); std::thread::sleep(Duration::from_millis(20)); }

@@ -33,6 +33,8 @@ mod panel;
 #[cfg(target_os = "linux")]
 mod pw;
 #[cfg(target_os = "linux")]
+mod sistema;
+#[cfg(target_os = "linux")]
 mod storage;
 #[cfg(windows)]
 mod winaudio;
@@ -91,6 +93,13 @@ fn main() {
             }
         }
         #[cfg(target_os = "linux")]
+        "preparar-sistema" => {
+            if let Err(e) = sistema::prepare() {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(target_os = "linux")]
         "menu" => {
             if let Err(e) = menu::run() {
                 eprintln!("menú: {e}");
@@ -123,7 +132,7 @@ fn main() {
             serve()
         }
         _ => {
-            eprintln!("uso: pantalla-host [instalar [--sustituir-movild | --solo-menu] | desinstalar | menu | panel | info | --version]");
+            eprintln!("uso: pantalla-host [instalar [--sustituir-movild | --solo-menu] | desinstalar | menu | panel | preparar-sistema | info | --version]");
             std::process::exit(2);
         }
     }

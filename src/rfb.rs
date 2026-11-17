@@ -43,6 +43,18 @@ struct Req {
     h264: bool,
 }
 
+/// Lo que se ve del vídeo de una sesión (para los paneles): compresor, imágenes/s y ms por imagen
+#[derive(Default)]
+pub struct Stats {
+    pub inner: Mutex<(String, f32, f32)>,
+}
+
+impl Stats {
+    pub fn get(&self) -> (String, f32, f32) {
+        self.inner.lock().unwrap().clone()
+    }
+}
+
 struct Shared {
     req: Mutex<Req>,
     cv: Condvar,
@@ -58,7 +70,7 @@ fn be32(b: &[u8]) -> u32 {
 
 /// Arranca el servidor en dos hilos (lector de mensajes del móvil + codificador).
 /// `rx`: bytes que llegan del móvil por el canal 1. `tx`: bytes para el canal 1.
-pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSender<Vec<u8>>, stop: Arc<AtomicBool>, fps: f32) {
+pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSender<Vec<u8>>, stop: Arc<AtomicBool>, fps: f32, stats: Arc<Stats>) {
     let shared = Arc::new(Shared { req: Mutex::new(Req::default()), cv: Condvar::new() });
     let (w, h) = display.size();
 
@@ -128,6 +140,8 @@ pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSend
             };
             let (ew, eh) = enc.size();
             crate::host::log(&format!("vídeo: {}x{} con {}", ew, eh, enc.name()));
+            *stats.inner.lock().unwrap() = (enc.name().to_string(), 0.0, 0.0);
+            let (mut n, mut ms_sum, mut t_win) = (0u32, 0f32, std::time::Instant::now());
             let mut last_seq = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 // espera una petición
@@ -155,6 +169,7 @@ pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSend
                 let Some(frame) = frame else { continue };
                 // si mientras tanto llegó una petición completa, se hace IDR
                 let idr = full || shared.req.lock().unwrap().full;
+                let t_enc = std::time::Instant::now();
                 let data = match enc.encode(&frame, idr) {
                     Ok(d) => d,
                     Err(e) => {
@@ -163,6 +178,13 @@ pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSend
                     }
                 };
                 last_seq = frame.seq;
+                n += 1;
+                ms_sum += t_enc.elapsed().as_secs_f32() * 1000.0;
+                let el = t_win.elapsed().as_secs_f32();
+                if el >= 2.0 {
+                    *stats.inner.lock().unwrap() = (enc.name().to_string(), n as f32 / el, if n > 0 { ms_sum / n as f32 } else { 0.0 });
+                    (n, ms_sum, t_win) = (0, 0.0, std::time::Instant::now());
+                }
                 if data.is_empty() {
                     continue;
                 }

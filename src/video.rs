@@ -54,6 +54,7 @@ impl Encoder {
         })
     }
 
+    #[allow(dead_code)] // (el bench no lo usa)
     pub fn size(&self) -> (usize, usize) {
         (self.w, self.h)
     }
@@ -111,7 +112,7 @@ impl H264 {
             .bitrate(BitRate::from_bps(bps))
             .max_frame_rate(FrameRate::from_hz(fps))
             .skip_frames(false)
-            .num_threads(2);
+            .num_threads(1);
         let enc = OhEncoder::with_api_config(OpenH264API::from_source(), cfg).map_err(|e| format!("openh264: {e}"))?;
         Ok(Self { enc, w, h, y: vec![0; w * h], u: vec![0; w * h / 4], v: vec![0; w * h / 4] })
     }

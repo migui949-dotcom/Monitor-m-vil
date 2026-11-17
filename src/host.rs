@@ -49,6 +49,8 @@ struct Sess {
     media_error: String,
     /// por qué este móvil no tiene webcam en el ordenador (si no la tiene)
     cam_unavailable: Option<String>,
+    /// vídeo del escritorio: compresor, imágenes/s, ms por imagen
+    video: Option<Arc<crate::rfb::Stats>>,
     #[cfg(target_os = "linux")]
     mic: Option<crate::audio::Mic>,
 }
@@ -132,7 +134,8 @@ fn session_json(slot: u8, s: &Sess) -> Value {
     json!({"s": slot, "output": if s.screen { Some(util::output_name(slot)) } else { None },
            "peer": s.peer, "since": s.since, "phone": s.phone, "standby": s.standby,
            "position": util::position(slot), "ws": util::phone_workspace(slot), "storage": s.storage,
-           "sink": sink, "media": media_json(slot, s)})
+           "sink": sink, "media": media_json(slot, s),
+           "video": s.video.as_ref().map(|v| { let (e, fps, ms) = v.get(); json!({"encoder": e, "fps": (fps * 10.0).round() / 10.0, "ms": (ms * 10.0).round() / 10.0}) })})
 }
 
 fn write_status() {
@@ -828,7 +831,22 @@ async fn session(
     if let Some(d) = &display {
         let (in_tx, in_rx) = std::sync::mpsc::channel();
         let (v_tx, mut v_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        crate::rfb::spawn(d.clone(), in_rx, v_tx, stop.clone(), 60.0);
+        let stats = Arc::new(crate::rfb::Stats::default());
+        with_sess(slot, |x| x.video = Some(stats.clone()));
+        crate::rfb::spawn(d.clone(), in_rx, v_tx, stop.clone(), 60.0, stats.clone());
+        // el panel ve fps/ms al momento: cada 3 s se reescribe el estado mientras dura la sesión
+        {
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    write_status();
+                }
+            });
+        }
         let out = out_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = v_rx.recv().await {

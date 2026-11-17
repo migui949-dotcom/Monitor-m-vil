@@ -43,16 +43,26 @@ pub fn alive() -> bool {
         .unwrap_or(false)
 }
 
+/// Un proceso hijo que sigue a su aire: alguien tiene que recoger su salida (wait) o queda
+/// como zombi colgando del servicio
+fn detach(c: std::io::Result<std::process::Child>) {
+    if let Ok(mut c) = c {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
+    }
+}
+
 /// Abre el panel como proceso aparte (desde el servicio)
 pub fn spawn() {
     let _ = std::fs::write(alive_path(), b"1"); // que no se abran dos a la vez
     if let Ok(me) = std::env::current_exe() {
-        let _ = std::process::Command::new(me)
+        detach(std::process::Command::new(me)
             .arg("panel")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn());
     }
 }
 
@@ -72,9 +82,9 @@ pub fn spawn_camera(s: u64) {
     }
     let _ = std::fs::write(camera_alive_path(s), b"1");
     if let Ok(me) = std::env::current_exe() {
-        let _ = std::process::Command::new(me).arg("camara").arg(s.to_string())
+        detach(std::process::Command::new(me).arg("camara").arg(s.to_string())
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn());
     }
 }
 
@@ -479,7 +489,7 @@ impl eframe::App for Panel {
                     send(ap, q("/standby?on=toggle"));
                 }
                 if pill(ui, "\u{F024B}", "Archivos", false, theme::YELLOW) {
-                    let _ = std::process::Command::new("xdg-open").arg(x.storage()).spawn();
+                    detach(std::process::Command::new("xdg-open").arg(x.storage()).spawn());
                 }
             });
 

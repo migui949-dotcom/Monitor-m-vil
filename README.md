@@ -43,8 +43,12 @@ Y ya está: abre la app en el móvil, elige el ordenador y acepta en el ordenado
   <móvil>"), su micrófono ("Micrófono de <móvil>"), su webcam ("Cámara de <móvil>", el 1º sigue siendo
   "Camara del movil") y su carpeta (`~/Móvil`, `~/Móvil (<móvil>)`). Las ventanas suenan en el móvil en
   cuyo monitor están. El panel enseña todos; las URL locales aceptan `&s=N` para elegir el móvil.
+- **Vídeo por hardware**: si el sistema tiene `ffmpeg` con VAAPI (Intel/AMD) o NVENC (NVIDIA), la pantalla se
+  comprime con la gráfica (mucha menos CPU y menos retardo); si no, o si falla, con OpenH264 dentro del programa.
+  `ENCODER=auto|software|vaapi|nvenc` en host.conf lo fuerza. El estado de cada móvil (`movild.json`) dice qué
+  compresor usa, a cuántas imágenes por segundo y cuántos ms tarda cada una.
 - **Opciones** en `~/.config/movil-pantalla/host.conf`: `POSITION=auto-left|auto-right|…` (1er móvil),
-  `POSITION_2=…` (los demás), `PHONE_WS=11` (escritorio del 1er móvil en Hyprland; los siguientes, +10
+  `POSITION_2=…` (los demás), `ENCODER=auto`, `PHONE_WS=11` (escritorio del 1er móvil en Hyprland; los siguientes, +10
   cada uno), `MAX_PHONES=4`, `PANEL=no`, `MENU=…`.
 - Por cable USB hace falta `adb`.
 
@@ -68,6 +72,9 @@ Para compilarla tú: `app/build.sh` (Rust + NDK, sin Gradle).
 cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.31 --bin pantalla-host  # Linux compatible (glibc ≥ 2.31)
 cargo build --release --target x86_64-pc-windows-gnu --bin pantalla-host             # Windows (g++-mingw-w64-x86-64)
 ```
+
+Hace falta `nasm` en el PATH: sin él OpenH264 se compila sin ensamblador y va ~2,5 veces más lento
+(`build.rs` avisa). Si se instala después: `cargo clean -p openh264-sys2`.
 
 Estado y siguientes pasos: [PLAN.md](PLAN.md).
 

@@ -56,6 +56,16 @@ pub fn config_dir() -> PathBuf {
     home().join(".config/movil-pantalla")
 }
 
+/// Guarda `CLAVE=valor` en host.conf (cambia la línea si ya estaba)
+pub fn set_conf(key: &str, val: &str) -> std::io::Result<()> {
+    let path = config_dir().join("host.conf");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out: Vec<String> = text.lines().filter(|l| !l.trim().starts_with(&format!("{key}="))).map(String::from).collect();
+    out.push(format!("{key}={val}"));
+    std::fs::create_dir_all(config_dir())?;
+    std::fs::write(path, out.join("\n") + "\n")
+}
+
 /// Lee `CLAVE=valor` de host.conf (formato shell sencillo).
 pub fn conf(key: &str) -> Option<String> {
     let text = std::fs::read_to_string(config_dir().join("host.conf")).ok()?;

@@ -63,7 +63,39 @@ pub fn is_hyprland() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() && hyprctl(&["version"]).map(|v| v.contains("Hyprland")).unwrap_or(false)
 }
 
+static SIZE: std::sync::Mutex<Option<(u32, u32)>> = std::sync::Mutex::new(None);
+
+fn lua_config() -> bool {
+    hyprctl(&["eval", "return 1"])
+        .map(|r| {
+            let r = r.to_lowercase();
+            !r.contains("only supported with the lua") && !r.contains("unknown") && !r.contains("invalid")
+        })
+        .unwrap_or(false)
+}
+
+fn monitor_rule(w: u32, h: u32, lua: bool) -> Result<(), String> {
+    let pos = crate::util::conf("POSITION").unwrap_or_else(|| "auto-right".into());
+    let mode = format!("{w}x{h}@60");
+    if lua {
+        hyprctl(&["eval", &format!("hl.monitor({{ output = \"{OUTPUT}\", mode = \"{mode}\", position = \"{pos}\", scale = \"1\" }})")])?;
+    } else {
+        hyprctl(&["keyword", "monitor", &format!("{OUTPUT},{mode},{pos},1")])?;
+    }
+    Ok(())
+}
+
+/// Recoloca el monitor del móvil con la POSITION de host.conf (si hay uno ahora)
+pub fn reposition() {
+    if let Some((w, h)) = *SIZE.lock().unwrap() {
+        if is_hyprland() {
+            let _ = monitor_rule(w, h, lua_config());
+        }
+    }
+}
+
 fn create_monitor(w: u32, h: u32) -> Result<(), String> {
+    *SIZE.lock().unwrap() = Some((w, h));
     // monitor con el foco ANTES de crear el del móvil (al crearlo, Hyprland le da el foco)
     let prev = hyprctl(&["activeworkspace"]).ok()
         .and_then(|t| t.split(" on monitor ").nth(1).map(|r| r.split(':').next().unwrap_or("").trim().to_string()));
@@ -71,20 +103,8 @@ fn create_monitor(w: u32, h: u32) -> Result<(), String> {
         hyprctl(&["output", "create", "headless", OUTPUT])?;
         std::thread::sleep(Duration::from_millis(300));
     }
-    let pos = crate::util::conf("POSITION").unwrap_or_else(|| "auto-right".into());
-    let mode = format!("{w}x{h}@60");
-    // Hyprland con configuración en Lua (0.57+) o clásica
-    let lua = hyprctl(&["eval", "return 1"])
-        .map(|r| {
-            let r = r.to_lowercase();
-            !r.contains("only supported with the lua") && !r.contains("unknown") && !r.contains("invalid")
-        })
-        .unwrap_or(false);
-    if lua {
-        hyprctl(&["eval", &format!("hl.monitor({{ output = \"{OUTPUT}\", mode = \"{mode}\", position = \"{pos}\", scale = \"1\" }})")])?;
-    } else {
-        hyprctl(&["keyword", "monitor", &format!("{OUTPUT},{mode},{pos},1")])?;
-    }
+    let lua = lua_config();
+    monitor_rule(w, h, lua)?;
     // Escritorio propio (11 por defecto, PHONE_WS en host.conf): Hyprland le da el primer número
     // libre y entonces Super+3 (por ejemplo) llevaba al móvil y las ventanas acababan allí
     let ws = crate::util::conf("PHONE_WS").unwrap_or_else(|| "11".into());
@@ -107,6 +127,7 @@ fn create_monitor(w: u32, h: u32) -> Result<(), String> {
 }
 
 pub fn remove_monitor() {
+    *SIZE.lock().unwrap() = None;
     let _ = hyprctl(&["output", "remove", OUTPUT]);
     normal_wallpaper();
 }

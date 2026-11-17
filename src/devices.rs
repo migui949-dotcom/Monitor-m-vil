@@ -23,8 +23,8 @@ static GEN: AtomicU64 = AtomicU64::new(0); // cambia al apagar la cámara: el de
 static FEED: OnceLock<SyncSender<(u64, Vec<u8>)>> = OnceLock::new();
 static FRAMES: OnceLock<SyncSender<Vec<u8>>> = OnceLock::new();
 static PREVIEW: Mutex<Option<(Instant, Vec<u8>)>> = Mutex::new(None);
-pub const PREVIEW_W: usize = 320;
-pub const PREVIEW_H: usize = 180;
+pub const PREVIEW_W: usize = 640;
+pub const PREVIEW_H: usize = 360;
 
 /// Última imagen de la cámara en pequeño (RGB) si es de hace menos de 1 s
 pub fn preview() -> Option<Vec<u8>> {
@@ -35,7 +35,7 @@ pub fn preview() -> Option<Vec<u8>> {
 fn make_preview(f: &[u8]) {
     {
         let p = PREVIEW.lock().unwrap();
-        if p.as_ref().map(|(t, _)| t.elapsed() < Duration::from_millis(66)).unwrap_or(false) {
+        if p.as_ref().map(|(t, _)| t.elapsed() < Duration::from_millis(40)).unwrap_or(false) {
             return;
         }
     }

@@ -109,6 +109,13 @@ fn main() {
             }
         }
         #[cfg(target_os = "linux")]
+        "camara" | "cámara" => {
+            if let Err(e) = panel::run_camera() {
+                eprintln!("cámara: {e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(target_os = "linux")]
         "panel" => {
             if let Err(e) = panel::run() {
                 eprintln!("panel: {e}");

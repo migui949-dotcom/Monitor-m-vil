@@ -56,6 +56,28 @@ pub fn spawn() {
     }
 }
 
+fn camera_alive_path() -> std::path::PathBuf {
+    crate::util::state_dir().join("camara.vivo")
+}
+
+fn camera_window_open() -> bool {
+    std::fs::metadata(camera_alive_path()).and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|e| e < Duration::from_secs(3)).unwrap_or(false)).unwrap_or(false)
+}
+
+/// Saca la cámara a su propia ventana (si no está ya abierta)
+pub fn spawn_camera() {
+    if camera_window_open() {
+        return;
+    }
+    let _ = std::fs::write(camera_alive_path(), b"1");
+    if let Ok(me) = std::env::current_exe() {
+        let _ = std::process::Command::new(me).arg("camara")
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
 fn get_bytes(port: u16, path: &str) -> Option<Vec<u8>> {
     let mut s = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(400)).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
@@ -102,6 +124,7 @@ struct Data {
     almacen: String,
     preview: Option<Vec<u8>>,
     preview_gen: u64,
+    window: bool,
 }
 
 struct Panel {
@@ -147,12 +170,14 @@ impl Panel {
                 std::thread::sleep(Duration::from_secs(1));
             });
         }
-        // vista de la cámara (~15 imágenes/s, solo mientras está encendida)
+        // vista de la cámara en el panel (~25 imágenes/s), solo si está encendida y no tiene ventana propia
         {
             let (data, ctx) = (data.clone(), cc.egui_ctx.clone());
             std::thread::spawn(move || loop {
                 let on = data.lock().unwrap().media["cam"].as_bool().unwrap_or(false);
-                if !on {
+                let window = camera_window_open();
+                data.lock().unwrap().window = window;
+                if !on || window {
                     data.lock().unwrap().preview = None;
                     std::thread::sleep(Duration::from_millis(300));
                     continue;
@@ -165,17 +190,17 @@ impl Panel {
                     d.preview_gen += 1;
                 }
                 ctx.request_repaint();
-                std::thread::sleep(Duration::from_millis(66));
+                std::thread::sleep(Duration::from_millis(40));
             });
         }
         Panel {
+            tex: None,
+            tex_gen: 0,
             data,
             dark: false,
             height: 0.0,
             answer_port,
             media_port,
-            tex: None,
-            tex_gen: 0,
             bright: None,
             bright_sent: std::time::Instant::now(),
         }
@@ -222,24 +247,21 @@ fn tile(ui: &mut egui::Ui, w: f32, icon: &str, title: &str, value: &str, accent:
 
 impl eframe::App for Panel {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let (st, md, alm, preview) = {
+        let (st, md, alm, preview, window) = {
             let mut d = self.data.lock().unwrap();
             let pv = if d.preview_gen != self.tex_gen { self.tex_gen = d.preview_gen; Some(d.preview.take()) } else { None };
-            (d.status.clone(), d.media.clone(), d.almacen.clone(), pv)
+            (d.status.clone(), d.media.clone(), d.almacen.clone(), pv, d.window)
         };
-        let ctx = ui.ctx().clone();
         if let Some(pv) = preview {
-            match pv {
-                Some(px) => {
-                    let img = egui::ColorImage::from_rgb([crate::devices::PREVIEW_W, crate::devices::PREVIEW_H], &px);
-                    match self.tex.as_mut() {
-                        Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                        None => self.tex = Some(ctx.load_texture("camara", img, egui::TextureOptions::LINEAR)),
-                    }
+            if let Some(px) = pv {
+                let img = egui::ColorImage::from_rgb([crate::devices::PREVIEW_W, crate::devices::PREVIEW_H], &px);
+                match self.tex.as_mut() {
+                    Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                    None => self.tex = Some(ui.ctx().load_texture("camara", img, egui::TextureOptions::LINEAR)),
                 }
-                None => self.tex = None,
             }
         }
+        let ctx = ui.ctx().clone();
         let connected = st["connected"].as_bool().unwrap_or(false);
         if !connected {
             self.dark = false;
@@ -291,7 +313,7 @@ impl eframe::App for Panel {
             }
 
             // Datos
-            let w = ((W - 28.0) - 8.0) / 2.0;
+            let w = (ui.available_width() - 8.0) / 2.0;
             let level = ph["level"].as_i64().filter(|l| *l >= 0);
             let charging = ph["charging"].as_bool().unwrap_or(false);
             ui.horizontal(|ui| {
@@ -313,7 +335,7 @@ impl eframe::App for Panel {
                 ui.label(txt("\u{F00DE}", 15.0, theme::YELLOW));
                 let phone_b = ph["brightness"].as_f64().filter(|b| *b >= 0.0).unwrap_or(0.6) as f32;
                 let mut b = self.bright.unwrap_or(phone_b);
-                ui.spacing_mut().slider_width = W - 28.0 - 30.0;
+                ui.spacing_mut().slider_width = ui.available_width() - 8.0;
                 let r = ui.add(egui::Slider::new(&mut b, 0.02..=1.0).show_value(false).trailing_fill(true));
                 if r.changed() {
                     self.bright = Some(b);
@@ -360,8 +382,9 @@ impl eframe::App for Panel {
                     send(self.media_port, format!("/set?mic={}", if mic { "off" } else { "on" }));
                 }
             });
-            if cam {
-                let size = egui::vec2(W - 28.0, (W - 28.0) * 9.0 / 16.0);
+            // lo que ve la cámara: aquí, o en su propia ventana (botón "Ventana")
+            if cam && !window {
+                let size = egui::vec2(ui.available_width(), ui.available_width() * 9.0 / 16.0);
                 match &self.tex {
                     Some(t) => {
                         ui.add(egui::Image::new(t).fit_to_exact_size(size).corner_radius(12.0));
@@ -373,7 +396,29 @@ impl eframe::App for Panel {
                         });
                     }
                 }
+                if pill(ui, "\u{F05AF}", "Abrir en una ventana", false, theme::BLUE) {
+                    self.tex = None;
+                    spawn_camera();
+                }
+            } else if cam && window {
+                ui.label(txt("\u{F05AF}  La cámara está en su propia ventana", 11.0, theme::SUBTEXT));
             }
+            if !cam || window {
+                self.tex = None;
+            }
+
+            // Posición del monitor del móvil: por ese lado pasa el ratón de una pantalla a otra
+            ui.label(txt("Posición del móvil", 12.0, theme::SUBTEXT));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let cur = crate::util::conf("POSITION").unwrap_or_else(|| "auto-right".into());
+                for (p, icon, name) in [("left", "\u{F004D}", "Izq."), ("up", "\u{F005D}", "Arriba"), ("down", "\u{F0045}", "Abajo"), ("right", "\u{F0054}", "Der.")] {
+                    if pill(ui, icon, name, cur == format!("auto-{p}"), theme::SKY) {
+                        let _ = crate::util::set_conf("POSITION", &format!("auto-{p}"));
+                        send(self.answer_port, format!("/position?p={p}"));
+                    }
+                }
+            });
             if let Some(e) = md["error"].as_str().filter(|e| !e.is_empty()) {
                 ui.label(txt(e, 11.0, theme::PEACH));
             }
@@ -387,14 +432,114 @@ impl eframe::App for Panel {
         let content_h = (inner.inner + 28.0).round();
         if (content_h - self.height).abs() > 1.0 {
             self.height = content_h;
-            // (en Wayland una ventana "no redimensionable" queda clavada a su primer tamaño: se fijan
-            // a la vez el mínimo, el máximo y el tamaño)
-            let sz = egui::vec2(W, content_h);
-            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(sz));
-            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(sz));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(sz));
+            // (solo el alto; el ancho lo puede cambiar quien lo use)
+            let w = ctx.content_rect().width().max(W);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, content_h)));
         }
     }
+}
+
+/// Ventana "Cámara del móvil": lo que ve la cámara, en una ventana normal (se mueve y se cambia de
+/// tamaño como cualquier otra). Se cierra sola si la cámara se apaga.
+struct Camera {
+    frame: Arc<Mutex<(u64, Option<Vec<u8>>, bool)>>,
+    tex: Option<egui::TextureHandle>,
+    seen: u64,
+}
+
+impl eframe::App for Camera {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let (gen, px, on) = {
+            let mut f = self.frame.lock().unwrap();
+            let px = if f.0 != self.seen { f.1.take() } else { None };
+            (f.0, px, f.2)
+        };
+        if !on {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if gen != self.seen {
+            self.seen = gen;
+            if let Some(px) = px {
+                let img = egui::ColorImage::from_rgb([crate::devices::PREVIEW_W, crate::devices::PREVIEW_H], &px);
+                match self.tex.as_mut() {
+                    Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                    None => self.tex = Some(ctx.load_texture("camara", img, egui::TextureOptions::LINEAR)),
+                }
+            }
+        }
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::BLACK)).show(ui, |ui| {
+            let avail = ui.available_size();
+            let ratio = crate::devices::PREVIEW_W as f32 / crate::devices::PREVIEW_H as f32;
+            let size = if avail.x / avail.y > ratio { egui::vec2(avail.y * ratio, avail.y) } else { egui::vec2(avail.x, avail.x / ratio) };
+            ui.centered_and_justified(|ui| match &self.tex {
+                Some(t) => {
+                    ui.add(egui::Image::new(t).fit_to_exact_size(size));
+                }
+                None => {
+                    ui.label(txt("Encendiendo la cámara…", 14.0, theme::SUBTEXT));
+                }
+            });
+        });
+    }
+}
+
+pub fn run_camera() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    crate::linux::ensure_env();
+    let frame = Arc::new(Mutex::new((0u64, None::<Vec<u8>>, true)));
+    {
+        let frame = frame.clone();
+        std::thread::spawn(move || {
+            let mut off_since: Option<std::time::Instant> = None;
+            let mut last_state = std::time::Instant::now() - Duration::from_secs(5);
+            let mut ctx_wait = 0;
+            loop {
+                let _ = std::fs::write(camera_alive_path(), b"1");
+                // ¿sigue encendida? (cada segundo; se cierra a los 3 s de apagarse)
+                if last_state.elapsed() > Duration::from_secs(1) {
+                    last_state = std::time::Instant::now();
+                    let on = get(6083, "/state").and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                        .map(|v| v["cam"].as_bool().unwrap_or(false)).unwrap_or(false);
+                    off_since = if on { None } else { off_since.or(Some(std::time::Instant::now())) };
+                    if off_since.map(|t| t.elapsed() > Duration::from_secs(3)).unwrap_or(false) {
+                        frame.lock().unwrap().2 = false;
+                    }
+                }
+                let px = get_bytes(6083, "/preview")
+                    .filter(|p| p.len() == crate::devices::PREVIEW_W * crate::devices::PREVIEW_H * 3);
+                {
+                    let mut f = frame.lock().unwrap();
+                    f.0 += 1;
+                    f.1 = px;
+                }
+                ctx_wait += 1;
+                std::thread::sleep(Duration::from_millis(40));
+                let _ = ctx_wait;
+            }
+        });
+    }
+    let opts = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Cámara del móvil")
+            .with_app_id("pantalla-host-camara")
+            .with_inner_size([640.0, 360.0])
+            .with_min_inner_size([160.0, 90.0])
+            .with_resizable(true),
+        ..Default::default()
+    };
+    let r = eframe::run_native("Cámara del móvil", opts, Box::new(move |cc| {
+        // repintar al ritmo de las imágenes
+        let ctx = cc.egui_ctx.clone();
+        std::thread::spawn(move || loop {
+            ctx.request_repaint();
+            std::thread::sleep(Duration::from_millis(40));
+        });
+        Ok(Box::new(Camera { frame, tex: None, seen: 0 }))
+    }));
+    let _ = std::fs::remove_file(camera_alive_path());
+    r.map_err(|e| e.to_string())
 }
 
 pub fn run() -> Result<(), String> {
@@ -409,6 +554,7 @@ pub fn run() -> Result<(), String> {
             .with_title("Escritorio")
             .with_app_id("pantalla-host")
             .with_inner_size([W, 200.0])
+            .with_min_inner_size([W, 60.0])
             .with_resizable(true),
         ..Default::default()
     };

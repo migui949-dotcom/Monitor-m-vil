@@ -211,9 +211,9 @@ async fn ask_user(device: &str, fp: &str, via: &str) -> bool {
     if std::env::var("MOVILD_TEST_ACCEPT").as_deref() == Ok("1") {
         return true;
     }
-    // sin la barra Quickshell: se abre el panel "Escritorio" para enseñar la tarjeta
+    // se abre el panel "Escritorio" para enseñar la tarjeta (con o sin la barra Quickshell)
     #[cfg(target_os = "linux")]
-    if !quickshell_running() && !crate::panel::alive() && util::conf("PANEL").as_deref() != Some("no") {
+    if !crate::panel::alive() && util::conf("PANEL").as_deref() != Some("no") {
         crate::panel::spawn();
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -272,6 +272,17 @@ async fn answer_http(stream: TcpStream) {
             None => false,
         },
         "/screen" => send(json!({"t": "screen", "on": matches!(q.get("on").copied().unwrap_or("1"), "1" | "on")})),
+        "/position" => {
+            let p = q.get("p").copied().unwrap_or("");
+            if matches!(p, "left" | "right" | "up" | "down") {
+                let _ = util::set_conf("POSITION", &format!("auto-{p}"));
+                #[cfg(target_os = "linux")]
+                crate::linux::reposition();
+                true
+            } else {
+                false
+            }
+        }
         "/brightness" => send(json!({"t": "brightness", "v": q.get("v").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0)})),
         "/standby" => {
             let cur = st().standby;

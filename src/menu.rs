@@ -59,36 +59,48 @@ pub fn run() -> Result<(), String> {
     crate::linux::ensure_env();
     let st: Value = std::fs::read_to_string(crate::host::status_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let md: Value = get(MEDIA, "/state").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-    let connected = st["connected"].as_bool().unwrap_or(false);
-    let (cam, mic) = (md["cam"].as_bool().unwrap_or(false), md["mic"].as_bool().unwrap_or(false));
-    let sb = st["standby"].as_bool().unwrap_or(false);
+    let multi = st["sessions"].is_array();
+    let sess = crate::panel::sessions(&st, &md);
 
     // (texto, acción)
     let mut items: Vec<(String, Box<dyn Fn()>)> = vec![];
-    if let Some(p) = st.get("pending").filter(|p| !p.is_null()) {
+    for p in crate::panel::pendings(&st) {
         let id = p["id"].as_str().unwrap_or("").to_string();
         let dev = p["device"].as_str().unwrap_or("el móvil").to_string();
         let fp = p["fp"].as_str().unwrap_or("").to_string();
         let id2 = id.clone();
         items.push((format!("✔ Aceptar {dev} (huella {fp})"), Box::new(move || { get(ANSWER, &format!("/answer?id={id}&ok=1")); })));
-        items.push((format!("✘ Rechazar {dev}"), Box::new(move || { get(ANSWER, &format!("/answer?id={id2}&ok=0")); })));
+        items.push((format!("✘ Rechazar {dev} (huella {fp})"), Box::new(move || { get(ANSWER, &format!("/answer?id={id2}&ok=0")); })));
     }
-    if connected {
-        let dev = st["peer"]["device"].as_str().unwrap_or("móvil").to_string();
-        items.push((if cam { "Cámara: apagar" } else { "Cámara: encender" }.into(),
-                    Box::new(move || { get(MEDIA, &format!("/set?cam={}", if cam { 0 } else { 1 })); })));
-        items.push(("Cámara: cambiar delantera / trasera".into(), Box::new(|| { get(MEDIA, "/set?facing=flip"); })));
-        items.push((if mic { "Micrófono: apagar" } else { "Micrófono: encender" }.into(),
-                    Box::new(move || { get(MEDIA, &format!("/set?mic={}", if mic { 0 } else { 1 })); })));
+    let several = sess.len() > 1;
+    for x in &sess {
+        let s = x.s;
+        let dev = x.device();
+        // con varios móviles cada orden lleva delante de quién es
+        let pre = if several { format!("{dev} · ") } else { String::new() };
+        let q = move |path: &str| crate::panel::with_s(path, s, multi);
+        let (cam, mic) = (x.media["cam"].as_bool().unwrap_or(false), x.media["mic"].as_bool().unwrap_or(false));
+        let sb = x.info["standby"].as_bool().unwrap_or(false);
+        let u = q(&format!("/set?cam={}", if cam { 0 } else { 1 }));
+        items.push((format!("{pre}{}", if cam { "Cámara: apagar" } else { "Cámara: encender" }), Box::new(move || { get(MEDIA, &u); })));
+        let u = q("/set?facing=flip");
+        items.push((format!("{pre}Cámara: cambiar delantera / trasera"), Box::new(move || { get(MEDIA, &u); })));
+        let u = q(&format!("/set?mic={}", if mic { 0 } else { 1 }));
+        items.push((format!("{pre}{}", if mic { "Micrófono: apagar" } else { "Micrófono: encender" }), Box::new(move || { get(MEDIA, &u); })));
         for (t, v) in [("100 %", "1"), ("75 %", "0.75"), ("50 %", "0.5"), ("25 %", "0.25"), ("mínimo", "0.01"), ("automático", "-1")] {
-            items.push((format!("Brillo del móvil: {t}"), Box::new(move || { get(ANSWER, &format!("/brightness?v={v}")); })));
+            let u = q(&format!("/brightness?v={v}"));
+            items.push((format!("{pre}Brillo del móvil: {t}"), Box::new(move || { get(ANSWER, &u); })));
         }
-        items.push(("Pantalla del móvil: apagar".into(), Box::new(|| { get(ANSWER, "/screen?on=0"); })));
-        items.push(("Pantalla del móvil: encender".into(), Box::new(|| { get(ANSWER, "/screen?on=1"); })));
-        items.push((if sb { "Stand-by: quitar" } else { "Stand-by: poner" }.into(),
-                    Box::new(move || { get(ANSWER, &format!("/standby?on={}", if sb { 0 } else { 1 })); })));
-        items.push((format!("Desconectar {dev}"), Box::new(|| { get(ANSWER, "/disconnect"); })));
-    } else if items.is_empty() {
+        let u = q("/screen?on=0");
+        items.push((format!("{pre}Pantalla del móvil: apagar"), Box::new(move || { get(ANSWER, &u); })));
+        let u = q("/screen?on=1");
+        items.push((format!("{pre}Pantalla del móvil: encender"), Box::new(move || { get(ANSWER, &u); })));
+        let u = q(&format!("/standby?on={}", if sb { 0 } else { 1 }));
+        items.push((format!("{pre}{}", if sb { "Stand-by: quitar" } else { "Stand-by: poner" }), Box::new(move || { get(ANSWER, &u); })));
+        let u = q("/disconnect");
+        items.push((format!("Desconectar {dev}"), Box::new(move || { get(ANSWER, &u); })));
+    }
+    if items.is_empty() {
         items.push(("Sin móvil conectado: abre la app Escritorio en el móvil".into(), Box::new(|| {})));
     }
     items.push(("Abrir el panel".into(), Box::new(|| {

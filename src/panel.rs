@@ -56,23 +56,23 @@ pub fn spawn() {
     }
 }
 
-fn camera_alive_path() -> std::path::PathBuf {
-    crate::util::state_dir().join("camara.vivo")
+fn camera_alive_path(s: u64) -> std::path::PathBuf {
+    crate::util::state_dir().join(if s <= 1 { "camara.vivo".to_string() } else { format!("camara-{s}.vivo") })
 }
 
-fn camera_window_open() -> bool {
-    std::fs::metadata(camera_alive_path()).and_then(|m| m.modified())
+fn camera_window_open(s: u64) -> bool {
+    std::fs::metadata(camera_alive_path(s)).and_then(|m| m.modified())
         .map(|t| t.elapsed().map(|e| e < Duration::from_secs(3)).unwrap_or(false)).unwrap_or(false)
 }
 
-/// Saca la cámara a su propia ventana (si no está ya abierta)
-pub fn spawn_camera() {
-    if camera_window_open() {
+/// Saca la cámara del móvil `s` a su propia ventana (si no está ya abierta): `pantalla-host camara N`
+pub fn spawn_camera(s: u64) {
+    if camera_window_open(s) {
         return;
     }
-    let _ = std::fs::write(camera_alive_path(), b"1");
+    let _ = std::fs::write(camera_alive_path(s), b"1");
     if let Ok(me) = std::env::current_exe() {
-        let _ = std::process::Command::new(me).arg("camara")
+        let _ = std::process::Command::new(me).arg("camara").arg(s.to_string())
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
             .spawn();
     }
@@ -106,9 +106,9 @@ fn movil_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Móvil")
 }
 
-/// Espacio usado en ~/Móvil ("1.2 / 10 GB")
-fn almacen() -> String {
-    let Ok(c) = std::ffi::CString::new(movil_dir().to_string_lossy().as_bytes()) else { return String::new() };
+/// Espacio usado en la carpeta del móvil ("1.2 / 10 GB")
+fn almacen(dir: &std::path::Path) -> String {
+    let Ok(c) = std::ffi::CString::new(dir.to_string_lossy().as_bytes()) else { return String::new() };
     let mut v: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c.as_ptr(), &mut v) } != 0 || v.f_blocks == 0 {
         return String::new();
@@ -117,25 +117,94 @@ fn almacen() -> String {
     format!("{:.1} / {} GB", (size - free) / 1e9, (size / 1e9).round())
 }
 
+/// Un móvil conectado. `s` es su ranura (1 = la de siempre: MOVIL, ~/Móvil, /dev/video42…)
+#[derive(Clone)]
+pub(crate) struct Sess {
+    pub s: u64,
+    /// la entrada de "sessions" de movild.json (peer, phone, standby, position, storage…)
+    pub info: Value,
+    /// cámara/micro de este móvil (cam, mic, facing, error…)
+    pub media: Value,
+}
+
+impl Sess {
+    pub fn device(&self) -> String {
+        self.info["phone"]["device"].as_str().or(self.info["peer"]["device"].as_str()).unwrap_or("Móvil").to_string()
+    }
+    pub fn storage(&self) -> std::path::PathBuf {
+        self.info["storage"].as_str().map(std::path::PathBuf::from).unwrap_or_else(movil_dir)
+    }
+}
+
+/// Los móviles conectados según movild.json (+ /state del 6083). Con un servicio de los de antes
+/// (sin "sessions") sale uno solo, el s=1, con los campos de siempre.
+pub(crate) fn sessions(st: &Value, md: &Value) -> Vec<Sess> {
+    if let Some(arr) = st["sessions"].as_array() {
+        let mut v: Vec<Sess> = arr.iter().enumerate().map(|(i, x)| {
+            let s = x["s"].as_u64().unwrap_or(i as u64 + 1);
+            let media = if x["media"].is_object() {
+                x["media"].clone()
+            } else if let Some(m) = md["sessions"].as_array().and_then(|a| a.iter().find(|m| m["s"].as_u64() == Some(s)).or(a.get(i))) {
+                m.clone()
+            } else if i == 0 {
+                md.clone()
+            } else {
+                Value::Null
+            };
+            Sess { s, info: x.clone(), media }
+        }).collect();
+        v.sort_by_key(|x| x.s);
+        return v;
+    }
+    if st["connected"].as_bool().unwrap_or(false) {
+        let info = serde_json::json!({ "peer": st["peer"], "phone": st["phone"], "standby": st["standby"] });
+        return vec![Sess { s: 1, info, media: md.clone() }];
+    }
+    vec![]
+}
+
+/// Móviles esperando a que se les acepte ("pendings"; con el servicio viejo, "pending")
+pub(crate) fn pendings(st: &Value) -> Vec<Value> {
+    match st["pendings"].as_array() {
+        Some(a) => a.clone(),
+        None => st.get("pending").filter(|p| !p.is_null()).cloned().into_iter().collect(),
+    }
+}
+
+/// Añade &s=N a una orden; solo si el servicio sabe de varios móviles (los viejos no lo entienden)
+pub(crate) fn with_s(path: &str, s: u64, multi: bool) -> String {
+    if !multi {
+        return path.to_string();
+    }
+    format!("{path}{}s={s}", if path.contains('?') { '&' } else { '?' })
+}
+
 #[derive(Default)]
 struct Data {
     status: Value,
     media: Value,
-    almacen: String,
+    /// carpeta → "usado / total"
+    almacen: std::collections::HashMap<std::path::PathBuf, String>,
+    /// móvil cuya cámara se enseña (lo elige la ventana)
+    sel: u64,
     preview: Option<Vec<u8>>,
+    preview_s: u64,
     preview_gen: u64,
     window: bool,
 }
 
 struct Panel {
     data: Arc<Mutex<Data>>,
-    dark: bool,
+    /// móvil elegido en las pestañas
+    sel: u64,
+    /// pantalla del móvil apagada (por ranura)
+    dark: std::collections::HashMap<u64, bool>,
     height: f32,
     answer_port: u16,
     media_port: u16,
     tex: Option<egui::TextureHandle>,
     tex_gen: u64,
-    bright: Option<f32>,
+    bright: Option<(u64, f32)>,
     bright_sent: std::time::Instant,
 }
 
@@ -147,9 +216,9 @@ impl Panel {
         v.selection.bg_fill = theme::YELLOW;
         v.widgets.inactive.bg_fill = theme::alpha(theme::TEXT, 0.1);
         cc.egui_ctx.set_visuals(v);
-        let data = Arc::new(Mutex::new(Data::default()));
+        let data = Arc::new(Mutex::new(Data { sel: 1, ..Default::default() }));
         let (answer_port, media_port) = (crate::util::env_port("MOVILD_ANSWER_PORT", 47802), 6083);
-        // cada segundo: estado del servicio (movild.json), cámara/micro y ~/Móvil; y "estoy vivo"
+        // cada segundo: estado del servicio (movild.json), cámara/micro y carpetas; y "estoy vivo"
         {
             let (data, ctx) = (data.clone(), cc.egui_ctx.clone());
             std::thread::spawn(move || loop {
@@ -158,8 +227,13 @@ impl Panel {
                     .ok()
                     .and_then(|t| serde_json::from_str(&t).ok())
                     .unwrap_or(Value::Null);
-                let media = get(media_port, "/state").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-                let alm = almacen();
+                let media: Value = get(media_port, "/state").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+                let mut alm = std::collections::HashMap::new();
+                for x in sessions(&status, &media) {
+                    let dir = x.storage();
+                    let a = almacen(&dir);
+                    alm.insert(dir, a);
+                }
                 {
                     let mut d = data.lock().unwrap();
                     d.status = status;
@@ -170,23 +244,29 @@ impl Panel {
                 std::thread::sleep(Duration::from_secs(1));
             });
         }
-        // vista de la cámara en el panel (~25 imágenes/s), solo si está encendida y no tiene ventana propia
+        // vista de la cámara del móvil elegido (~25 imágenes/s), si está encendida y sin ventana propia
         {
             let (data, ctx) = (data.clone(), cc.egui_ctx.clone());
             std::thread::spawn(move || loop {
-                let on = data.lock().unwrap().media["cam"].as_bool().unwrap_or(false);
-                let window = camera_window_open();
+                let (on, s, multi) = {
+                    let d = data.lock().unwrap();
+                    let v = sessions(&d.status, &d.media);
+                    let on = v.iter().find(|x| x.s == d.sel).map(|x| x.media["cam"].as_bool().unwrap_or(false)).unwrap_or(false);
+                    (on, d.sel, d.status["sessions"].is_array())
+                };
+                let window = camera_window_open(s);
                 data.lock().unwrap().window = window;
                 if !on || window {
                     data.lock().unwrap().preview = None;
                     std::thread::sleep(Duration::from_millis(300));
                     continue;
                 }
-                let px = get_bytes(media_port, "/preview")
+                let px = get_bytes(media_port, &with_s("/preview", s, multi))
                     .filter(|p| p.len() == crate::devices::PREVIEW_W * crate::devices::PREVIEW_H * 3);
                 {
                     let mut d = data.lock().unwrap();
                     d.preview = px;
+                    d.preview_s = s;
                     d.preview_gen += 1;
                 }
                 ctx.request_repaint();
@@ -197,7 +277,8 @@ impl Panel {
             tex: None,
             tex_gen: 0,
             data,
-            dark: false,
+            sel: 1,
+            dark: Default::default(),
             height: 0.0,
             answer_port,
             media_port,
@@ -249,45 +330,76 @@ impl eframe::App for Panel {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let (st, md, alm, preview, window) = {
             let mut d = self.data.lock().unwrap();
-            let pv = if d.preview_gen != self.tex_gen { self.tex_gen = d.preview_gen; Some(d.preview.take()) } else { None };
+            d.sel = self.sel;
+            let pv = if d.preview_gen != self.tex_gen {
+                self.tex_gen = d.preview_gen;
+                Some(if d.preview_s == self.sel { d.preview.take() } else { None })
+            } else {
+                None
+            };
             (d.status.clone(), d.media.clone(), d.almacen.clone(), pv, d.window)
         };
-        if let Some(pv) = preview {
-            if let Some(px) = pv {
-                let img = egui::ColorImage::from_rgb([crate::devices::PREVIEW_W, crate::devices::PREVIEW_H], &px);
-                match self.tex.as_mut() {
-                    Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                    None => self.tex = Some(ui.ctx().load_texture("camara", img, egui::TextureOptions::LINEAR)),
-                }
+        if let Some(Some(px)) = preview {
+            let img = egui::ColorImage::from_rgb([crate::devices::PREVIEW_W, crate::devices::PREVIEW_H], &px);
+            match self.tex.as_mut() {
+                Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                None => self.tex = Some(ui.ctx().load_texture("camara", img, egui::TextureOptions::LINEAR)),
             }
         }
         let ctx = ui.ctx().clone();
-        let connected = st["connected"].as_bool().unwrap_or(false);
-        if !connected {
-            self.dark = false;
+        let multi = st["sessions"].is_array();
+        let list = sessions(&st, &md);
+        let pend = pendings(&st);
+        self.dark.retain(|s, _| list.iter().any(|x| x.s == *s));
+        // si el elegido se ha ido, el primero que quede
+        if !list.iter().any(|x| x.s == self.sel) {
+            self.sel = list.first().map(|x| x.s).unwrap_or(1);
+            self.tex = None;
         }
-        let (cam, mic) = (md["cam"].as_bool().unwrap_or(false), md["mic"].as_bool().unwrap_or(false));
-        let ph = &st["phone"];
-        let peer = &st["peer"];
-        let via = if peer["via"].as_str() == Some("cable") { "por cable" } else { "por wifi" };
+        let cur = list.iter().find(|x| x.s == self.sel).cloned();
+        let (ap, mp, sel) = (self.answer_port, self.media_port, self.sel);
+        let q = move |p: &str| with_s(p, sel, multi);
 
         let inner = egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(14.0)).show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
             ui.vertical(|ui| {
+            // Pestañas: una por móvil (solo si hay más de uno)
+            if list.len() > 1 {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for x in &list {
+                        let cam_on = x.media["cam"].as_bool().unwrap_or(false);
+                        let icon = if cam_on { "\u{F0100}" } else { "\u{F011C}" };
+                        if pill(ui, icon, &x.device(), x.s == self.sel, theme::BLUE) && x.s != self.sel {
+                            self.sel = x.s;
+                            self.tex = None;
+                            self.bright = None;
+                        }
+                    }
+                });
+            }
             ui.vertical(|ui| {
                 // Cabecera
                 ui.spacing_mut().item_spacing.y = 2.0;
-                let name = ph["device"].as_str().or(peer["device"].as_str()).unwrap_or("Móvil");
-                ui.label(txt(name, 15.0, theme::TEXT).strong());
-                if connected {
-                    ui.label(txt(format!("Conectado {via} · cifrado"), 11.0, theme::GREEN));
-                } else {
-                    ui.label(txt("Sin conectar · ábrelo desde la app «Escritorio» del móvil", 11.0, theme::SUBTEXT));
+                match &cur {
+                    Some(x) => {
+                        ui.label(txt(x.device(), 15.0, theme::TEXT).strong());
+                        let via = if x.info["peer"]["via"].as_str() == Some("cable") { "por cable" } else { "por wifi" };
+                        let extra = match (x.info["output"].as_str(), list.len() > 1) {
+                            (Some(o), true) => format!(" · {o}"),
+                            _ => String::new(),
+                        };
+                        ui.label(txt(format!("Conectado {via} · cifrado{extra}"), 11.0, theme::GREEN));
+                    }
+                    None => {
+                        ui.label(txt("Móvil", 15.0, theme::TEXT).strong());
+                        ui.label(txt("Sin conectar · ábrelo desde la app «Escritorio» del móvil", 11.0, theme::SUBTEXT));
+                    }
                 }
             });
 
-            // móvil que pide conectarse
-            if let Some(p) = st.get("pending").filter(|p| !p.is_null()) {
+            // móviles que piden conectarse
+            for p in &pend {
                 egui::Frame::new()
                     .fill(theme::alpha(theme::YELLOW, 0.08))
                     .stroke(egui::Stroke::new(1.0, theme::alpha(theme::YELLOW, 0.35)))
@@ -300,17 +412,18 @@ impl eframe::App for Panel {
                         ui.horizontal(|ui| {
                             let id = p["id"].as_str().unwrap_or("").to_string();
                             if pill(ui, "\u{F012C}", "Aceptar", true, theme::GREEN) {
-                                send(self.answer_port, format!("/answer?id={id}&ok=1"));
+                                send(ap, format!("/answer?id={id}&ok=1"));
                             }
                             if pill(ui, "\u{F0156}", "Rechazar", true, theme::RED) {
-                                send(self.answer_port, format!("/answer?id={id}&ok=0"));
+                                send(ap, format!("/answer?id={id}&ok=0"));
                             }
                         });
                     });
             }
-            if !connected {
-                return;
-            }
+            let Some(x) = cur.as_ref() else { return };
+            let (ph, md) = (&x.info["phone"], &x.media);
+            let (cam, mic) = (md["cam"].as_bool().unwrap_or(false), md["mic"].as_bool().unwrap_or(false));
+            let dark = self.dark.get(&x.s).copied().unwrap_or(false);
 
             // Datos
             let w = (ui.available_width() - 8.0) / 2.0;
@@ -327,25 +440,28 @@ impl eframe::App for Panel {
                 let (tot, free) = (ph["stotal"].as_f64().unwrap_or(0.0), ph["sfree"].as_f64().unwrap_or(0.0));
                 let used = if tot > 0.0 { format!("{}% usado", ((tot - free) / tot * 100.0).round()) } else { "—".into() };
                 tile(ui, w, "\u{F02CA}", "Almacenamiento", &used, theme::LAVENDER);
-                tile(ui, w, "\u{F024B}", "~/Móvil", if alm.is_empty() { "—" } else { &alm }, theme::YELLOW);
+                let dir = x.storage();
+                let name = format!("~/{}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                let a = alm.get(&dir).cloned().unwrap_or_default();
+                tile(ui, w, "\u{F024B}", &name, if a.is_empty() { "—" } else { &a }, theme::YELLOW);
             });
 
             // Brillo
             ui.horizontal(|ui| {
                 ui.label(txt("\u{F00DE}", 15.0, theme::YELLOW));
                 let phone_b = ph["brightness"].as_f64().filter(|b| *b >= 0.0).unwrap_or(0.6) as f32;
-                let mut b = self.bright.unwrap_or(phone_b);
+                let mut b = self.bright.filter(|(s, _)| *s == x.s).map(|(_, b)| b).unwrap_or(phone_b);
                 ui.spacing_mut().slider_width = ui.available_width() - 8.0;
                 let r = ui.add(egui::Slider::new(&mut b, 0.02..=1.0).show_value(false).trailing_fill(true));
                 if r.changed() {
-                    self.bright = Some(b);
+                    self.bright = Some((x.s, b));
                     if self.bright_sent.elapsed() > Duration::from_millis(80) {
                         self.bright_sent = std::time::Instant::now();
-                        send(self.answer_port, format!("/brightness?v={b:.2}"));
+                        send(ap, q(&format!("/brightness?v={b:.2}")));
                     }
                 }
                 if r.drag_stopped() {
-                    send(self.answer_port, format!("/brightness?v={b:.2}"));
+                    send(ap, q(&format!("/brightness?v={b:.2}")));
                 }
                 if !r.dragged() && !r.changed() && (phone_b - b).abs() < 0.02 {
                     self.bright = None;
@@ -355,31 +471,32 @@ impl eframe::App for Panel {
             // Pantalla / stand-by / archivos
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if pill(ui, "\u{F0425}", if self.dark { "Apagada" } else { "Pantalla" }, !self.dark, theme::YELLOW) {
-                    self.dark = !self.dark;
-                    send(self.answer_port, format!("/screen?on={}", if self.dark { 0 } else { 1 }));
+                if pill(ui, "\u{F0425}", if dark { "Apagada" } else { "Pantalla" }, !dark, theme::YELLOW) {
+                    self.dark.insert(x.s, !dark);
+                    send(ap, q(&format!("/screen?on={}", if dark { 1 } else { 0 })));
                 }
-                if pill(ui, "\u{F04B2}", "Stand-by", st["standby"].as_bool().unwrap_or(false), theme::LAVENDER) {
-                    send(self.answer_port, "/standby?on=toggle".into());
+                if pill(ui, "\u{F04B2}", "Stand-by", x.info["standby"].as_bool().unwrap_or(false), theme::LAVENDER) {
+                    send(ap, q("/standby?on=toggle"));
                 }
                 if pill(ui, "\u{F024B}", "Archivos", false, theme::YELLOW) {
-                    let _ = std::process::Command::new("xdg-open").arg(movil_dir()).spawn();
+                    let _ = std::process::Command::new("xdg-open").arg(x.storage()).spawn();
                 }
             });
 
             // Cámara y micrófono
-            ui.label(txt("Cámara y micrófono", 12.0, theme::SUBTEXT));
+            let cam_label = md["cam_label"].as_str().map(|l| format!("Cámara y micrófono · «{l}»")).unwrap_or("Cámara y micrófono".into());
+            ui.add(egui::Label::new(txt(cam_label, 12.0, theme::SUBTEXT)).truncate());
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if pill(ui, if cam { "\u{F0100}" } else { "\u{F05DF}" }, "Cámara", cam, theme::RED) {
-                    send(self.media_port, format!("/set?cam={}", if cam { "off" } else { "on" }));
+                    send(mp, q(&format!("/set?cam={}", if cam { "off" } else { "on" })));
                 }
                 let trasera = md["facing"].as_str() == Some("environment");
                 if pill(ui, "\u{F0D19}", if trasera { "Trasera" } else { "Frontal" }, false, theme::BLUE) {
-                    send(self.media_port, "/set?facing=flip".into());
+                    send(mp, q("/set?facing=flip"));
                 }
                 if pill(ui, if mic { "\u{F036C}" } else { "\u{F036D}" }, "Micrófono", mic, theme::RED) {
-                    send(self.media_port, format!("/set?mic={}", if mic { "off" } else { "on" }));
+                    send(mp, q(&format!("/set?mic={}", if mic { "off" } else { "on" })));
                 }
             });
             // lo que ve la cámara: aquí, o en su propia ventana (botón "Ventana")
@@ -398,7 +515,7 @@ impl eframe::App for Panel {
                 }
                 if pill(ui, "\u{F05AF}", "Abrir en una ventana", false, theme::BLUE) {
                     self.tex = None;
-                    spawn_camera();
+                    spawn_camera(x.s);
                 }
             } else if cam && window {
                 ui.label(txt("\u{F05AF}  La cámara está en su propia ventana", 11.0, theme::SUBTEXT));
@@ -411,11 +528,17 @@ impl eframe::App for Panel {
             ui.label(txt("Posición del móvil", 12.0, theme::SUBTEXT));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let cur = crate::util::conf("POSITION").unwrap_or_else(|| "auto-right".into());
+                let key = if x.s <= 1 { "POSITION".to_string() } else { format!("POSITION_{}", x.s) };
+                let pos = x.info["position"].as_str().map(String::from)
+                    .or_else(|| crate::util::conf(&key))
+                    .unwrap_or_else(|| "auto-right".into());
                 for (p, icon, name) in [("left", "\u{F004D}", "Izq."), ("up", "\u{F005D}", "Arriba"), ("down", "\u{F0045}", "Abajo"), ("right", "\u{F0054}", "Der.")] {
-                    if pill(ui, icon, name, cur == format!("auto-{p}"), theme::SKY) {
-                        let _ = crate::util::set_conf("POSITION", &format!("auto-{p}"));
-                        send(self.answer_port, format!("/position?p={p}"));
+                    if pill(ui, icon, name, pos == format!("auto-{p}"), theme::SKY) {
+                        // el servicio nuevo guarda POSITION_n él solo; con el viejo lo guarda el panel
+                        if !multi {
+                            let _ = crate::util::set_conf("POSITION", &format!("auto-{p}"));
+                        }
+                        send(ap, q(&format!("/position?p={p}")));
                     }
                 }
             });
@@ -423,8 +546,9 @@ impl eframe::App for Panel {
                 ui.label(txt(e, 11.0, theme::PEACH));
             }
 
-            if pill(ui, "\u{F0156}", "Desconectar", false, theme::RED) {
-                send(self.answer_port, "/disconnect".into());
+            let bye = if list.len() > 1 { format!("Desconectar {}", x.device()) } else { "Desconectar".into() };
+            if pill(ui, "\u{F0156}", &bye, false, theme::RED) {
+                send(ap, q("/disconnect"));
             }
             }).response.rect.height()
         });
@@ -491,6 +615,18 @@ impl eframe::App for Camera {
 pub fn run_camera() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     crate::linux::ensure_env();
+    // `pantalla-host camara [N]`: N = ranura del móvil (1 si no se dice)
+    let s: u64 = std::env::args().skip_while(|a| a != "camara" && a != "cámara").nth(1)
+        .and_then(|a| a.parse().ok()).unwrap_or(1);
+    let read_status = || -> Value {
+        std::fs::read_to_string(crate::host::status_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null)
+    };
+    let st0 = read_status();
+    let multi = st0["sessions"].is_array();
+    let title = match sessions(&st0, &Value::Null).into_iter().find(|x| x.s == s) {
+        Some(x) if multi => format!("Cámara de {}", x.device()),
+        _ => "Cámara del móvil".to_string(),
+    };
     let frame = Arc::new(Mutex::new((0u64, None::<Vec<u8>>, true)));
     {
         let frame = frame.clone();
@@ -499,18 +635,19 @@ pub fn run_camera() -> Result<(), String> {
             let mut last_state = std::time::Instant::now() - Duration::from_secs(5);
             let mut ctx_wait = 0;
             loop {
-                let _ = std::fs::write(camera_alive_path(), b"1");
+                let _ = std::fs::write(camera_alive_path(s), b"1");
                 // ¿sigue encendida? (cada segundo; se cierra a los 3 s de apagarse)
                 if last_state.elapsed() > Duration::from_secs(1) {
                     last_state = std::time::Instant::now();
-                    let on = get(6083, "/state").and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                        .map(|v| v["cam"].as_bool().unwrap_or(false)).unwrap_or(false);
+                    let md = get(6083, "/state").and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+                    let on = sessions(&read_status(), &md).into_iter().find(|x| x.s == s)
+                        .map(|x| x.media["cam"].as_bool().unwrap_or(false)).unwrap_or(false);
                     off_since = if on { None } else { off_since.or(Some(std::time::Instant::now())) };
                     if off_since.map(|t| t.elapsed() > Duration::from_secs(3)).unwrap_or(false) {
                         frame.lock().unwrap().2 = false;
                     }
                 }
-                let px = get_bytes(6083, "/preview")
+                let px = get_bytes(6083, &with_s("/preview", s, multi))
                     .filter(|p| p.len() == crate::devices::PREVIEW_W * crate::devices::PREVIEW_H * 3);
                 {
                     let mut f = frame.lock().unwrap();
@@ -525,14 +662,14 @@ pub fn run_camera() -> Result<(), String> {
     }
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Cámara del móvil")
+            .with_title(title.clone())
             .with_app_id("pantalla-host-camara")
             .with_inner_size([640.0, 360.0])
             .with_min_inner_size([160.0, 90.0])
             .with_resizable(true),
         ..Default::default()
     };
-    let r = eframe::run_native("Cámara del móvil", opts, Box::new(move |cc| {
+    let r = eframe::run_native(&title, opts, Box::new(move |cc| {
         // repintar al ritmo de las imágenes
         let ctx = cc.egui_ctx.clone();
         std::thread::spawn(move || loop {
@@ -541,7 +678,7 @@ pub fn run_camera() -> Result<(), String> {
         });
         Ok(Box::new(Camera { frame, tex: None, seen: 0 }))
     }));
-    let _ = std::fs::remove_file(camera_alive_path());
+    let _ = std::fs::remove_file(camera_alive_path(s));
     r.map_err(|e| e.to_string())
 }
 

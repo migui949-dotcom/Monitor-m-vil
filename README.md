@@ -16,6 +16,7 @@ Dos piezas:
 | **Cámara del móvil** — webcam "Camara del movil", se enciende sola al usarla | ✅ | — |
 | Almacén del móvil en `~/Móvil` | ✅ | — |
 | Panel "Escritorio" y menú en fuzzel/rofi/wofi | ✅ | — |
+| **Varios móviles a la vez** (hasta 4), cada uno con su monitor, sonido, micro, webcam y carpeta | ✅ | — (uno) |
 
 ## Instalar en el ordenador (Linux)
 
@@ -26,7 +27,8 @@ Dos piezas:
    ```
    Se instala solo para tu usuario (servicio que arranca con la sesión, lanzador "Escritorio" y, en
    KDE, el permiso para crear el monitor) y abre el panel. Solo si hace falta, pide **una vez** la
-   contraseña de administrador para la webcam virtual y el cortafuegos. No hay que instalar nada más:
+   contraseña de administrador para la webcam virtual, el permiso para crear una webcam por cada móvil
+   más y el cortafuegos (si se instaló antes de la versión 0.3: `sudo pantalla-host preparar-sistema`). No hay que instalar nada más:
    el vídeo se comprime en el propio programa (vale con cualquier gráfica, también NVIDIA).
 
 Y ya está: abre la app en el móvil, elige el ordenador y acepta en el ordenador (panel o barra).
@@ -36,8 +38,14 @@ Y ya está: abre la app en el móvil, elige el ordenador y acepta en el ordenado
 - **Panel "Escritorio"** (búscalo en tu lanzador: fuzzel, rofi, wofi, menú de KDE…): aceptar móviles,
   batería y temperatura, brillo, pantalla del móvil, stand-by, archivos, cámara (en el panel o en su
   propia ventana), micro, posición del monitor (izquierda, arriba, abajo, derecha) y desconectar.
-- **Opciones** en `~/.config/movil-pantalla/host.conf`: `POSITION=auto-left|auto-right|…`,
-  `PHONE_WS=11` (escritorio del móvil en Hyprland), `PANEL=no`, `MENU=…`.
+- **Varios móviles**: conecta otro desde su app y acéptalo; cada uno tiene su monitor (`MOVIL`,
+  `MOVIL-2`… — el 2º sale por defecto al lado contrario del 1º), su salida de sonido ("Altavoces de
+  <móvil>"), su micrófono ("Micrófono de <móvil>"), su webcam ("Cámara de <móvil>", el 1º sigue siendo
+  "Camara del movil") y su carpeta (`~/Móvil`, `~/Móvil (<móvil>)`). Las ventanas suenan en el móvil en
+  cuyo monitor están. El panel enseña todos; las URL locales aceptan `&s=N` para elegir el móvil.
+- **Opciones** en `~/.config/movil-pantalla/host.conf`: `POSITION=auto-left|auto-right|…` (1er móvil),
+  `POSITION_2=…` (los demás), `PHONE_WS=11` (escritorio del 1er móvil en Hyprland; los siguientes, +10
+  cada uno), `MAX_PHONES=4`, `PANEL=no`, `MENU=…`.
 - Por cable USB hace falta `adb`.
 
 **Windows**: descarga `dist/pantalla-host-windows-x86_64.exe` y ábrelo con doble clic (se instala para tu

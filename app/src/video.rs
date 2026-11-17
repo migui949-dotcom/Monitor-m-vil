@@ -6,7 +6,8 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use glow::HasContext;
 use ndk::hardware_buffer::HardwareBufferUsage;
@@ -50,7 +51,75 @@ struct Decoder {
     pts: u64,
 }
 
+/// Medidas del vídeo en el móvil (se mandan en "info" cada 10 s y se ponen a cero):
+/// llegada → decodificada (decode_ms), decodificada → pintada (present_ms), imágenes pintadas por segundo.
+pub struct Medidas(Mutex<Med>);
+
+struct Med {
+    /// (pts en µs, llegada, decodificada) de las últimas imágenes
+    cola: VecDeque<(i64, Instant, Option<Instant>)>,
+    dec: (f64, u32),
+    pres: (f64, u32),
+    max_dec: f64,
+    pintadas: u32,
+    descartadas: u32,
+    desde: Instant,
+}
+
+impl Medidas {
+    fn new() -> Self {
+        Medidas(Mutex::new(Med { cola: VecDeque::new(), dec: (0.0, 0), pres: (0.0, 0), max_dec: 0.0,
+                                 pintadas: 0, descartadas: 0, desde: Instant::now() }))
+    }
+    fn llegada(&self, pts: i64) {
+        let mut m = self.0.lock().unwrap();
+        if m.cola.len() >= 64 { m.cola.pop_front(); }
+        m.cola.push_back((pts, Instant::now(), None));
+    }
+    fn descartada(&self) {
+        self.0.lock().unwrap().descartadas += 1;
+    }
+    fn decodificada(&self, pts: i64) {
+        let mut m = self.0.lock().unwrap();
+        let now = Instant::now();
+        if let Some(e) = m.cola.iter_mut().find(|e| e.0 == pts) {
+            e.2 = Some(now);
+            let ms = now.duration_since(e.1).as_secs_f64() * 1000.0;
+            m.dec.0 += ms;
+            m.dec.1 += 1;
+            if ms > m.max_dec { m.max_dec = ms; }
+        }
+    }
+    /// `ts_ns`: marca de tiempo de la imagen del ImageReader (= pts del códec en ns)
+    fn pintada(&self, ts_ns: Option<i64>) {
+        let mut m = self.0.lock().unwrap();
+        m.pintadas += 1;
+        let now = Instant::now();
+        if let Some(pts) = ts_ns.map(|t| t / 1000) {
+            if let Some(d) = m.cola.iter().find(|e| e.0 == pts).and_then(|e| e.2) {
+                m.pres.0 += now.duration_since(d).as_secs_f64() * 1000.0;
+                m.pres.1 += 1;
+            }
+        }
+    }
+    /// Lo medido desde la última vez, para "info"; se pone a cero
+    pub fn tomar(&self) -> serde_json::Value {
+        let mut m = self.0.lock().unwrap();
+        let secs = m.desde.elapsed().as_secs_f64().max(0.001);
+        let avg = |(s, n): (f64, u32)| if n > 0 { Some((s / n as f64 * 10.0).round() / 10.0) } else { None };
+        let v = serde_json::json!({
+            "decode_ms": avg(m.dec), "decode_max_ms": (m.max_dec * 10.0).round() / 10.0,
+            "present_ms": avg(m.pres),
+            "fps_shown": (m.pintadas as f64 / secs * 10.0).round() / 10.0,
+            "dropped": m.descartadas,
+        });
+        m.dec = (0.0, 0); m.pres = (0.0, 0); m.max_dec = 0.0; m.pintadas = 0; m.descartadas = 0; m.desde = Instant::now();
+        v
+    }
+}
+
 pub struct Video {
+    pub med: Arc<Medidas>,
     dec: Mutex<Option<Decoder>>,
     pub size: Mutex<(i32, i32)>,
     pub frames: Arc<AtomicU64>,
@@ -59,7 +128,7 @@ pub struct Video {
 
 impl Video {
     pub fn new() -> Video {
-        Video { dec: Mutex::new(None), size: Mutex::new((0, 0)), frames: Arc::new(AtomicU64::new(0)), ctx: Mutex::new(None) }
+        Video { med: Arc::new(Medidas::new()), dec: Mutex::new(None), size: Mutex::new((0, 0)), frames: Arc::new(AtomicU64::new(0)), ctx: Mutex::new(None) }
     }
 
     /// (Re)crea el decodificador para imágenes de w×h
@@ -92,12 +161,14 @@ impl Video {
             let (codec, stop) = (codec.clone(), stop.clone());
             let ctx = self.ctx.lock().unwrap().clone();
             let frames = self.frames.clone();
+            let med = self.med.clone();
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     match codec.0.dequeue_output_buffer(Duration::from_millis(20)) {
                         Ok(DequeuedOutputBufferInfoResult::Buffer(b)) => {
                             let n = frames.load(Ordering::Relaxed);
                             if n < 3 || n % 300 == 0 { log::info!("decodificada imagen #{n}"); }
+                            med.decodificada(b.info().presentation_time_us());
                             let _ = codec.0.release_output_buffer(b, true);
                             frames.fetch_add(1, Ordering::Relaxed);
                             if let Some(c) = &ctx { c.request_repaint(); }
@@ -125,9 +196,13 @@ impl Video {
                 let n = data.len().min(dst.len());
                 for (o, i) in dst[..n].iter_mut().zip(&data[..n]) { o.write(*i); }
                 d.pts += 16_666;
+                self.med.llegada(d.pts as i64);
                 if let Err(e) = d.codec.0.queue_input_buffer(buf, 0, n, d.pts, 0) { log::warn!("queue: {e:?}"); }
             }
-            Ok(DequeuedInputBufferResult::TryAgainLater) => log::warn!("decodificador lleno: imagen descartada"),
+            Ok(DequeuedInputBufferResult::TryAgainLater) => {
+                self.med.descartada();
+                log::warn!("decodificador lleno: imagen descartada")
+            }
             Err(e) => log::warn!("entrada del códec: {e:?}"),
         }
     }
@@ -215,6 +290,7 @@ impl Renderer {
                 let k = K.fetch_add(1, Ordering::Relaxed);
                 if k < 5 || k % 300 == 0 { log::info!("paint #{k}: acquire = {:?}", acq.as_ref().map(|r| matches!(r, AcquireResult::Image(_)))); }
                 if let Ok(AcquireResult::Image(img)) = acq {
+                    video.med.pintada(img.timestamp().ok());
                     if let Ok(hb) = img.hardware_buffer() {
                         let dpy = eglGetCurrentDisplay();
                         let client = eglGetNativeClientBufferANDROID(hb.as_ptr() as *const c_void);

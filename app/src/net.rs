@@ -285,7 +285,7 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
         serde_json::from_slice(&b[1..n]).map_err(|x| x.to_string())
     };
 
-    send(&mut t, &mut s, json!({"t": "hello", "device": device, "want": ["screen", "audio", "storage"]}))?;
+    send(&mut t, &mut s, json!({"t": "hello", "device": device, "want": ["screen", "audio", "storage"], "caps": ["echo", "medidas"]}))?;
     s.set_read_timeout(Some(Duration::from_secs(45))).ok();     // tiempo para pulsar Aceptar
     let screen;
     loop {
@@ -335,6 +335,7 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
     // estado del móvil → equipo cada 10 s (para su Quickshell, también por wifi)
     {
         let l = link.clone();
+        let vid = video.clone();
         std::thread::spawn(move || loop {
             if l.is_closed() { break; }
             #[cfg(target_os = "android")]
@@ -343,6 +344,8 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
                 v["t"] = json!("info");
                 v["device"] = json!(device_name());
                 v["cpu_temp"] = json!(cpu_temp());
+                // vídeo en el móvil desde el último info: decode_ms, present_ms, fps_shown, dropped
+                v["video"] = vid.med.tomar();
                 if l.send_json(v).is_err() { break; }
             }
             std::thread::sleep(Duration::from_secs(10));
@@ -368,6 +371,11 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
         match link.recv(&mut s) {
             Ok((CH_CONTROL, d)) => {
                 let v: Value = serde_json::from_slice(&d).unwrap_or(Value::Null);
+                // el ordenador mide la ida y vuelta: se contesta al momento con lo mismo
+                if v["t"] == "echo" {
+                    let _ = link.send_json(json!({"t": "echo", "ts": v["ts"]}));
+                    continue;
+                }
                 if v["t"] == "mic" {
                     let on = v["on"].as_bool().unwrap_or(false);
                     state.lock().unwrap().mic_on = on;

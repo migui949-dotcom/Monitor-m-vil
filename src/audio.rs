@@ -52,6 +52,29 @@ fn find_module(needle: &str) -> Option<u32> {
     sh(&["pactl", "list", "short", "modules"]).lines().find(|l| l.contains(needle)).and_then(|l| l.split_whitespace().next()?.parse().ok())
 }
 
+/// Que la salida del móvil no se quede como salida por defecto del sistema.
+/// WirePlumber recuerda la salida elegida y la vuelve a poner cada vez que reaparece: si alguna vez se
+/// eligió el móvil (o el ecualizador de la barra lo tomó como salida "física"), todo el sonido acababa en
+/// el móvil en cada conexión. Se apunta la salida normal y se recupera al empezar y al terminar.
+fn guard_default() {
+    let file = crate::util::state_dir().join("salida-normal");
+    let cur = sh(&["pactl", "get-default-sink"]).trim().to_string();
+    if !cur.is_empty() && cur != SINK {
+        let _ = std::fs::write(&file, &cur);
+        return;
+    }
+    if cur != SINK {
+        return;
+    }
+    let sinks: Vec<String> = json(&["pactl", "-f", "json", "list", "sinks"]).iter()
+        .filter_map(|s| s["name"].as_str().map(String::from)).filter(|n| n != SINK).collect();
+    let saved = std::fs::read_to_string(&file).ok().map(|s| s.trim().to_string()).filter(|s| sinks.contains(s));
+    if let Some(normal) = saved.or_else(|| sinks.first().cloned()) {
+        sh(&["pactl", "set-default-sink", &normal]);
+        crate::host::log(&format!("sonido: la salida por defecto era el móvil; vuelve a {normal}"));
+    }
+}
+
 pub struct Speakers {
     module: Option<u32>,
     task: tokio::task::JoinHandle<()>,
@@ -66,6 +89,9 @@ impl Speakers {
         let module = find_module(&format!("sink_name={SINK}")).or_else(|| {
             load_module(&["module-null-sink", &format!("sink_name={SINK}"), "sink_properties=\"device.description=\\\"Altavoces del móvil\\\"\""])
         });
+        // WirePlumber puede ponerla por defecto al aparecer (si la recordaba): se corrige
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        guard_default();
         let task = tokio::spawn(async move {
             let cap = tokio::spawn(capture(out));
             router().await;
@@ -78,6 +104,7 @@ impl Speakers {
 impl Drop for Speakers {
     fn drop(&mut self) {
         self.task.abort();
+        guard_default();
         // devuelve a la salida normal lo que sonaba en el móvil y quita la salida
         let sink_idx: HashSet<u64> = json(&["pactl", "-f", "json", "list", "sinks"])
             .iter()

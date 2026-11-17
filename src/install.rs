@@ -33,6 +33,21 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
         std::fs::copy(&me, &tmp).map_err(|e| format!("copiar: {e}"))?;
         std::fs::rename(&tmp, &dest).map_err(|e| format!("copiar: {e}"))?;
     }
+    // KDE Plasma: KWin solo deja crear monitores virtuales y mover el ratón a programas que lo
+    // declaran en su .desktop (se busca por la ruta del ejecutable)
+    let apps = home().join(".local/share/applications");
+    std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+    std::fs::write(
+        apps.join("pantalla-host.desktop"),
+        format!(
+            "[Desktop Entry]\nType=Application\nName=Escritorio (servicio del móvil)\nExec={}\nNoDisplay=true\n\
+             X-KDE-Wayland-Interfaces={}\n",
+            dest.display(),
+            crate::kde::INTERFACES
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    run("kbuildsycoca6", &["--noincremental"]);
     let unit_dir = home().join(".config/systemd/user");
     std::fs::create_dir_all(&unit_dir).map_err(|e| e.to_string())?;
     std::fs::write(
@@ -68,6 +83,7 @@ pub fn uninstall() -> Result<(), String> {
     let _ = std::fs::remove_file(home().join(".config/systemd/user/pantalla-host.service"));
     run("systemctl", &["--user", "daemon-reload"]);
     let _ = std::fs::remove_file(home().join(".local/bin/pantalla-host"));
+    let _ = std::fs::remove_file(home().join(".local/share/applications/pantalla-host.desktop"));
     // si estaba la versión en Python, se vuelve a ella
     if home().join(".config/systemd/user/movild.service").exists() {
         run("systemctl", &["--user", "enable", "--now", "movild"]);

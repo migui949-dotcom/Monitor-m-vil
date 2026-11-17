@@ -127,8 +127,19 @@ impl Drop for Hypr {
 
 pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
     ensure_env();
+    if crate::kde::is_kwin() {
+        return crate::kde::open(w, h);
+    }
     if !is_hyprland() {
-        return Err("no se encuentra una sesión de Hyprland".into());
+        // KDE Plasma (KWin): monitor virtual por zkde_screencast + PipeWire
+        if crate::kde::is_kwin() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            match crate::kde::open(w, h) {
+                Ok(d) => return Ok(d),
+                Err(e) if crate::kde::is_kwin() => return Err(e),
+                Err(_) => {}
+            }
+        }
+        return Err("escritorio no soportado todavía: hace falta Hyprland o KDE Plasma (Wayland)".into());
     }
     create_monitor(w, h)?;
     let slot = Arc::new(FrameSlot::default());
@@ -164,7 +175,7 @@ pub fn open(w: u32, h: u32) -> Result<Arc<dyn Display>, String> {
 type Err = Box<dyn std::error::Error>;
 
 /// Despacha eventos esperando como mucho `ms` (para poder mirar `stop` de vez en cuando).
-fn dispatch_timeout<S>(q: &mut EventQueue<S>, s: &mut S, ms: i32) -> Result<(), Err> {
+pub(crate) fn dispatch_timeout<S>(q: &mut EventQueue<S>, s: &mut S, ms: i32) -> Result<(), Err> {
     q.dispatch_pending(s)?;
     q.flush()?;
     if let Some(guard) = q.prepare_read() {

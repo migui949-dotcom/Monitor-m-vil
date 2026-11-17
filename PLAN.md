@@ -16,6 +16,18 @@ Binarios: `dist/` (Linux x86_64 y Windows x86_64, ver SHA256SUMS).
 Compilar: `cargo build --release` y `cargo build --release --target x86_64-pc-windows-gnu --bin pantalla-host`
 (necesita `g++-mingw-w64-x86-64`; `.cargo/config.toml` enlaza libstdc++ estática).
 
+## KDE Plasma (Wayland) — 2026-11-17
+- `src/kde.rs`: monitor virtual con `zkde_screencast_unstable_v1.stream_virtual_output` (como krfb), colocado con
+  `kscreen-doctor` según POSITION; ratón/teclado con `org_kde_kwin_fake_input` (el teclado lee el mapa XKB de KWin
+  → vale cualquier distribución; tildes que no estén → tecla muerta + letra).
+- `src/pw.rs`: cliente mínimo de PipeWire cargado con dlopen (sin cabeceras ni bindgen; sin PipeWire el binario sigue
+  arrancando). Pide BGRx/BGRA en memoria compartida. Test que compara los bytes SPA con los de libspa.
+- Permiso: KWin solo da esos protocolos a programas con `.desktop` y `X-KDE-Wayland-Interfaces`; `instalar` lo crea
+  en ~/.local/share/applications/pantalla-host.desktop (Exec = ruta del binario).
+- Probado con un KWin 6.7.5 de pruebas sin pantalla en el Nobara (`kwin_wayland --virtual`): ~27 fps, ventana abierta
+  en el monitor del móvil, permiso por .desktop sí/no. Falta probarlo en una sesión Plasma de verdad con el móvil.
+- El ordenador manda `screen_error` en `accepted` y la app lo enseña si no hay escritorio.
+
 ## Siguiente: cámara
 Protocolo actual (movild.py + media.py):
 - Encender/apagar: control `{"t":"media","cam":bool,"mic":bool,"facing":"user"|"environment"}` hacia la app;

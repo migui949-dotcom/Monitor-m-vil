@@ -512,15 +512,20 @@ async fn session(
     // empieza el RFB: la app descarta lo que llegue por el canal 1 antes de "accepted".
     let mut screen_in: Option<std::sync::mpsc::Sender<Vec<u8>>> = None;
     let mut display = None;
+    let mut screen_error = None;
     if want.iter().any(|w| w == "screen") {
         let (w, h) = screen_size(hello);
         match tokio::task::spawn_blocking(move || crate::display::open(w, h)).await? {
             Ok(d) => display = Some(d),
-            Err(e) => log(&format!("pantalla: {e}")),
+            Err(e) => {
+                log(&format!("pantalla: {e}"));
+                screen_error = Some(e);
+            }
         }
     }
 
-    let accepted = json!({"t": "accepted", "name": host_name(), "screen": display.is_some()});
+    // si no hay escritorio, el motivo va al móvil para que lo enseñe
+    let accepted = json!({"t": "accepted", "name": host_name(), "screen": display.is_some(), "screen_error": screen_error});
     out_tx.send((0, accepted.to_string().into_bytes()))?;
 
     if let Some(d) = &display {

@@ -8,12 +8,12 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
-fn rf(s: &mut TcpStream) -> Vec<u8> {
+fn rf(s: &mut TcpStream) -> Option<Vec<u8>> {
     let mut l = [0u8; 2];
-    s.read_exact(&mut l).unwrap();
+    s.read_exact(&mut l).ok()?;
     let mut b = vec![0u8; u16::from_be_bytes(l) as usize];
     s.read_exact(&mut b).unwrap();
-    b
+    Some(b)
 }
 
 fn wf(s: &mut TcpStream, d: &[u8]) {
@@ -43,7 +43,7 @@ fn main() {
     let mut buf = vec![0u8; 65535];
     let n = hs.write_message(&[], &mut buf).unwrap();
     wf(&mut s, &buf[..n]);
-    hs.read_message(&rf(&mut s), &mut buf).unwrap();
+    hs.read_message(&rf(&mut s).unwrap(), &mut buf).unwrap();
     let n = hs.write_message(&[], &mut buf).unwrap();
     wf(&mut s, &buf[..n]);
     let mut t = hs.into_transport_mode().unwrap();
@@ -72,7 +72,8 @@ fn main() {
         if started.map(|x| x.elapsed().as_secs() >= secs).unwrap_or(false) {
             break;
         }
-        let c = rf(&mut s);
+        // pantalla quieta (sin imágenes nuevas): se termina con lo que haya
+        let Some(c) = rf(&mut s) else { println!("(sin imágenes nuevas en 10 s)"); break };
         let n = t.read_message(&c, &mut pbuf).unwrap();
         let m = &pbuf[..n];
         if m[0] == 0 {

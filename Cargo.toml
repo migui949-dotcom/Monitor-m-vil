@@ -25,6 +25,7 @@ wayland-protocols = { version = "0.32", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 fuser = { version = "0.14", default-features = false }
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 
 [profile.release]
 opt-level = 3

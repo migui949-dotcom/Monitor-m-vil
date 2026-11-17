@@ -56,6 +56,8 @@ pub struct Shared {
     pub sb: Value,
     /// la interfaz pide cortar la sesión actual
     pub disconnect: bool,
+    /// por qué el ordenador no ha abierto el escritorio (si no lo ha hecho)
+    pub screen_error: Option<String>,
 }
 
 pub type State = Arc<Mutex<Shared>>;
@@ -284,7 +286,13 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
         let v = recv(&mut t, &mut s, &mut b)?;
         match v["t"].as_str() {
             Some("waiting") => state.lock().unwrap().status = Status::Waiting(host.name.clone()),
-            Some("accepted") => { screen = v["screen"].as_bool().unwrap_or(false); break }
+            Some("accepted") => {
+                screen = v["screen"].as_bool().unwrap_or(false);
+                state.lock().unwrap().screen_error = if screen { None } else {
+                    Some(v["screen_error"].as_str().unwrap_or("El ordenador no ha abierto el escritorio").to_string())
+                };
+                break
+            }
             Some("rejected") => return Err(v["why"].as_str().unwrap_or("Rechazado").to_string()),
             _ => {}
         }

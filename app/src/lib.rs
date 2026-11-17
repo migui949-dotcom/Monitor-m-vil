@@ -74,6 +74,7 @@ impl App {
             standby: false,
             sb: serde_json::Value::Null,
             disconnect: false,
+            screen_error: None,
         }));
         net::discovery(state.clone());
         let ident = Arc::new(Identity::load(data_dir.clone()));
@@ -481,6 +482,12 @@ impl eframe::App for App {
                             ui.label(big(format!("Conectado a {name}"), 38.0, theme::GREEN));
                             ui.add_space(8.0);
                             ui.label(big(if *cable { "Por cable · cifrado" } else { "Por wifi · cifrado" }, 20.0, theme::MUTED));
+                            let err = self.state.lock().unwrap().screen_error.clone();
+                            if let Some(e) = err {
+                                ui.add_space(14.0);
+                                ui.label(big("Sin escritorio:", 18.0, theme::YELLOW));
+                                ui.add(egui::Label::new(big(e, 16.0, theme::FG)).wrap());
+                            }
                             ui.add_space(40.0);
                             let b = egui::Button::new(big("Desconectar", 22.0, theme::BG)).fill(theme::RED)
                                 .corner_radius(18.0).min_size(egui::vec2(260.0, 70.0));

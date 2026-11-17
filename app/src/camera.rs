@@ -127,6 +127,13 @@ impl Camera {
             let Some(codec) = codec else { log::error!("codificador: no acepta ninguna configuración"); return None; };
             let window = match codec.create_input_surface() { Ok(w) => w, Err(e) => { log::error!("superficie: {e:?}"); return None; } };
             if let Err(e) = codec.start() { log::error!("codificador start: {e:?}"); return None; }
+            // El de Qualcomm (Snapdragon 845) no respeta del todo la tasa de configure (daba 34-110
+            // Mbit/s): fijada en marcha sí la respeta
+            {
+                let mut p = MediaFormat::new();
+                p.set_i32("video-bitrate", 3_000_000);
+                if let Err(e) = codec.set_parameters(p) { log::warn!("codificador: video-bitrate: {e:?}"); }
+            }
             let codec = Arc::new(SendCodec(codec));
 
             let mut dev: *mut sys::ACameraDevice = null_mut();

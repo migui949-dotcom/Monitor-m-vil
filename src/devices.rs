@@ -22,6 +22,44 @@ static ROT: AtomicI32 = AtomicI32::new(0);
 static GEN: AtomicU64 = AtomicU64::new(0); // cambia al apagar la cámara: el decodificador empieza de cero
 static FEED: OnceLock<SyncSender<(u64, Vec<u8>)>> = OnceLock::new();
 static FRAMES: OnceLock<SyncSender<Vec<u8>>> = OnceLock::new();
+static PREVIEW: Mutex<Option<(Instant, Vec<u8>)>> = Mutex::new(None);
+pub const PREVIEW_W: usize = 320;
+pub const PREVIEW_H: usize = 180;
+
+/// Última imagen de la cámara en pequeño (RGB) si es de hace menos de 1 s
+pub fn preview() -> Option<Vec<u8>> {
+    PREVIEW.lock().unwrap().as_ref().filter(|(t, _)| t.elapsed() < Duration::from_secs(1)).map(|(_, v)| v.clone())
+}
+
+/// Reduce una imagen de la webcam (I420 W x H) a RGB PREVIEW_W x PREVIEW_H; como mucho ~15 veces/s
+fn make_preview(f: &[u8]) {
+    {
+        let p = PREVIEW.lock().unwrap();
+        if p.as_ref().map(|(t, _)| t.elapsed() < Duration::from_millis(66)).unwrap_or(false) {
+            return;
+        }
+    }
+    if f.len() < FRAME {
+        return;
+    }
+    let (sx, sy) = (W / PREVIEW_W, H / PREVIEW_H);
+    let (yp, up, vp) = (&f[..W * H], &f[W * H..W * H + W * H / 4], &f[W * H + W * H / 4..]);
+    let mut out = Vec::with_capacity(PREVIEW_W * PREVIEW_H * 3);
+    for py in 0..PREVIEW_H {
+        let y = py * sy;
+        for px in 0..PREVIEW_W {
+            let x = px * sx;
+            let yy = yp[y * W + x] as f32 - 16.0;
+            let (u, v) = (up[(y / 2) * (W / 2) + x / 2] as f32 - 128.0, vp[(y / 2) * (W / 2) + x / 2] as f32 - 128.0);
+            let c = |v: f32| v.clamp(0.0, 255.0) as u8;
+            out.push(c(1.164 * yy + 1.596 * v));
+            out.push(c(1.164 * yy - 0.392 * u - 0.813 * v));
+            out.push(c(1.164 * yy + 2.017 * u));
+        }
+    }
+    *PREVIEW.lock().unwrap() = Some((Instant::now(), out));
+}
+
 static FPS: Mutex<(u32, Option<Instant>, f32)> = Mutex::new((0, None, 0.0));
 
 pub fn set_rot(deg: i32) {
@@ -213,6 +251,7 @@ fn writer(rx: Receiver<Vec<u8>>) {
         let frame = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(f) => {
                 last_real = Instant::now();
+                make_preview(&f);
                 f
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if last_real.elapsed() > Duration::from_secs(1) => idle.clone(),

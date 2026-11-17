@@ -396,6 +396,20 @@ async fn media_http(stream: TcpStream) {
     let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
     let (route, qs) = path.split_once('?').unwrap_or((&path, ""));
     let q: std::collections::HashMap<&str, &str> = qs.split('&').filter_map(|kv| kv.split_once('=')).collect();
+    // GET /preview: la última imagen de la cámara en pequeño (RGB, PREVIEW_W x PREVIEW_H) para el panel
+    #[cfg(target_os = "linux")]
+    if route == "/preview" {
+        let resp = match crate::devices::preview() {
+            Some(px) => {
+                let mut v = format!("HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n", px.len()).into_bytes();
+                v.extend_from_slice(&px);
+                v
+            }
+            None => b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        };
+        let _ = r.get_mut().write_all(&resp).await;
+        return;
+    }
     let body = match route {
         "/state" => Some(media_state()),
         "/set" => {
@@ -408,6 +422,10 @@ async fn media_http(stream: TcpStream) {
                 || q.get("facing").map(|f| *f != facing(&st()) && matches!(*f, "user" | "environment")).unwrap_or(false);
             if cam.is_some() || flip {
                 set_cam(cam, flip);
+            }
+            #[cfg(target_os = "linux")]
+            if cam == Some(true) && !q.contains_key("auto") && !crate::panel::alive() {
+                crate::panel::spawn();
             }
             Some(media_state())
         }
@@ -696,6 +714,11 @@ async fn session(
                         let flip = m["facing"].is_string();
                         if m["cam"].is_boolean() || flip {
                             set_cam(m["cam"].as_bool(), flip);
+                        }
+                        // encendida a mano: el panel enseña lo que ve la cámara
+                        #[cfg(target_os = "linux")]
+                        if m["cam"].as_bool() == Some(true) && !crate::panel::alive() {
+                            crate::panel::spawn();
                         }
                     }
                     "cam_rot" => {

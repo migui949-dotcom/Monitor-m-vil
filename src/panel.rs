@@ -11,17 +11,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const W: f32 = 330.0;
-const MINI: [f32; 2] = [210.0, 52.0];
 
+/// Mismos colores que la barra Quickshell (Catppuccin Mocha + cristal azul)
 mod theme {
     use eframe::egui::Color32;
-    pub const BG: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x26);
-    pub const SURFACE: Color32 = Color32::from_rgb(0x24, 0x28, 0x3b);
-    pub const FG: Color32 = Color32::from_rgb(0xc0, 0xca, 0xf5);
-    pub const MUTED: Color32 = Color32::from_rgb(0x56, 0x5f, 0x89);
-    pub const GREEN: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
-    pub const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
-    pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
+    pub const BG: Color32 = Color32::from_rgb(0x15, 0x1b, 0x38);
+    pub const TEXT: Color32 = Color32::from_rgb(0xcd, 0xd6, 0xf4);
+    pub const SUBTEXT: Color32 = Color32::from_rgb(0xa6, 0xad, 0xc8);
+    pub const BLUE: Color32 = Color32::from_rgb(0x89, 0xb4, 0xfa);
+    pub const SKY: Color32 = Color32::from_rgb(0x89, 0xdc, 0xeb);
+    pub const LAVENDER: Color32 = Color32::from_rgb(0xb4, 0xbe, 0xfe);
+    pub const GREEN: Color32 = Color32::from_rgb(0xa6, 0xe3, 0xa1);
+    pub const YELLOW: Color32 = Color32::from_rgb(0xf9, 0xe2, 0xaf);
+    pub const PEACH: Color32 = Color32::from_rgb(0xfa, 0xb3, 0x87);
+    pub const RED: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
+    pub fn alpha(c: Color32, a: f32) -> Color32 {
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 255.0) as u8)
+    }
 }
 
 /// Archivo que el panel toca cada segundo: el servicio sabe así que hay quien enseñe la tarjeta
@@ -39,6 +45,7 @@ pub fn alive() -> bool {
 
 /// Abre el panel como proceso aparte (desde el servicio)
 pub fn spawn() {
+    let _ = std::fs::write(alive_path(), b"1"); // que no se abran dos a la vez
     if let Ok(me) = std::env::current_exe() {
         let _ = std::process::Command::new(me)
             .arg("panel")
@@ -49,13 +56,21 @@ pub fn spawn() {
     }
 }
 
-fn get(port: u16, path: &str) -> Option<String> {
+fn get_bytes(port: u16, path: &str) -> Option<Vec<u8>> {
     let mut s = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(400)).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
     write!(s, "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").ok()?;
-    let mut r = String::new();
-    s.read_to_string(&mut r).ok()?;
-    Some(r.split_once("\r\n\r\n").map(|x| x.1.to_string()).unwrap_or_default())
+    let mut r = Vec::new();
+    s.read_to_end(&mut r).ok()?;
+    let i = r.windows(4).position(|w| w == b"\r\n\r\n")?;
+    if !r.starts_with(b"HTTP/1.0 200") && !r.starts_with(b"HTTP/1.1 200") {
+        return None;
+    }
+    Some(r[i + 4..].to_vec())
+}
+
+fn get(port: u16, path: &str) -> Option<String> {
+    get_bytes(port, path).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 /// Orden al servicio en segundo plano (no bloquea la ventana)
@@ -65,19 +80,40 @@ fn send(port: u16, path: String) {
     });
 }
 
+fn movil_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Móvil")
+}
+
+/// Espacio usado en ~/Móvil ("1.2 / 10 GB")
+fn almacen() -> String {
+    let Ok(c) = std::ffi::CString::new(movil_dir().to_string_lossy().as_bytes()) else { return String::new() };
+    let mut v: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut v) } != 0 || v.f_blocks == 0 {
+        return String::new();
+    }
+    let (size, free) = (v.f_blocks as f64 * v.f_frsize as f64, v.f_bfree as f64 * v.f_frsize as f64);
+    format!("{:.1} / {} GB", (size - free) / 1e9, (size / 1e9).round())
+}
+
 #[derive(Default)]
 struct Data {
     status: Value,
     media: Value,
+    almacen: String,
+    preview: Option<Vec<u8>>,
+    preview_gen: u64,
 }
 
 struct Panel {
     data: Arc<Mutex<Data>>,
-    mini: bool,
-    screen_off: bool,
-    size: Option<egui::Vec2>,
+    dark: bool,
+    height: f32,
     answer_port: u16,
     media_port: u16,
+    tex: Option<egui::TextureHandle>,
+    tex_gen: u64,
+    bright: Option<f32>,
+    bright_sent: std::time::Instant,
 }
 
 impl Panel {
@@ -85,10 +121,12 @@ impl Panel {
         let mut v = egui::Visuals::dark();
         v.panel_fill = theme::BG;
         v.window_fill = theme::BG;
+        v.selection.bg_fill = theme::YELLOW;
+        v.widgets.inactive.bg_fill = theme::alpha(theme::TEXT, 0.1);
         cc.egui_ctx.set_visuals(v);
         let data = Arc::new(Mutex::new(Data::default()));
         let (answer_port, media_port) = (crate::util::env_port("MOVILD_ANSWER_PORT", 47802), 6083);
-        // cada segundo: estado del servicio (movild.json) y de cámara/micro; y "estoy vivo"
+        // cada segundo: estado del servicio (movild.json), cámara/micro y ~/Móvil; y "estoy vivo"
         {
             let (data, ctx) = (data.clone(), cc.egui_ctx.clone());
             std::thread::spawn(move || loop {
@@ -98,25 +136,48 @@ impl Panel {
                     .and_then(|t| serde_json::from_str(&t).ok())
                     .unwrap_or(Value::Null);
                 let media = get(media_port, "/state").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-                *data.lock().unwrap() = Data { status, media };
+                let alm = almacen();
+                {
+                    let mut d = data.lock().unwrap();
+                    d.status = status;
+                    d.media = media;
+                    d.almacen = alm;
+                }
                 ctx.request_repaint();
                 std::thread::sleep(Duration::from_secs(1));
             });
         }
-        Panel { data, mini: false, screen_off: false, size: None, answer_port, media_port }
-    }
-
-    /// Tamaño de la ventana según lo que enseña (solo se pide cuando cambia)
-    fn fit(&mut self, ctx: &egui::Context, connected: bool, pending: bool) {
-        let size = if self.mini {
-            egui::Vec2::from(MINI)
-        } else {
-            let h = 60.0 + if pending { 110.0 } else { 0.0 } + if connected { 190.0 } else if pending { 0.0 } else { 60.0 };
-            egui::vec2(W, h)
-        };
-        if self.size != Some(size) {
-            self.size = Some(size);
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        // vista de la cámara (~15 imágenes/s, solo mientras está encendida)
+        {
+            let (data, ctx) = (data.clone(), cc.egui_ctx.clone());
+            std::thread::spawn(move || loop {
+                let on = data.lock().unwrap().media["cam"].as_bool().unwrap_or(false);
+                if !on {
+                    data.lock().unwrap().preview = None;
+                    std::thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
+                let px = get_bytes(media_port, "/preview")
+                    .filter(|p| p.len() == crate::devices::PREVIEW_W * crate::devices::PREVIEW_H * 3);
+                {
+                    let mut d = data.lock().unwrap();
+                    d.preview = px;
+                    d.preview_gen += 1;
+                }
+                ctx.request_repaint();
+                std::thread::sleep(Duration::from_millis(66));
+            });
+        }
+        Panel {
+            data,
+            dark: false,
+            height: 0.0,
+            answer_port,
+            media_port,
+            tex: None,
+            tex_gen: 0,
+            bright: None,
+            bright_sent: std::time::Instant::now(),
         }
     }
 }
@@ -125,133 +186,214 @@ fn txt(t: impl Into<String>, size: f32, c: egui::Color32) -> egui::RichText {
     egui::RichText::new(t).size(size).color(c)
 }
 
-fn toggle(ui: &mut egui::Ui, label: &str, on: bool, w: f32) -> bool {
-    let b = egui::Button::new(txt(label, 14.0, if on { theme::BG } else { theme::FG }))
-        .fill(if on { theme::GREEN } else { theme::SURFACE })
-        .corner_radius(10.0)
-        .min_size(egui::vec2(w, 36.0));
-    ui.add(b).clicked()
+/// Botón redondo como los de la barra: icono + texto; encendido = fondo y borde del color
+fn pill(ui: &mut egui::Ui, icon: &str, text: &str, active: bool, accent: egui::Color32) -> bool {
+    let mut job = egui::text::LayoutJob::default();
+    let font = |s: f32| egui::FontId::proportional(s);
+    if !icon.is_empty() {
+        job.append(icon, 0.0, egui::TextFormat::simple(font(14.0), if active { accent } else { theme::TEXT }));
+    }
+    job.append(text, if icon.is_empty() { 0.0 } else { 6.0 }, egui::TextFormat::simple(font(12.0), theme::TEXT));
+    let fill = if active { theme::alpha(accent, 0.25) } else { theme::alpha(egui::Color32::WHITE, 0.05) };
+    let b = egui::Button::new(job)
+        .fill(fill)
+        .stroke(if active { egui::Stroke::new(1.0, accent) } else { egui::Stroke::NONE })
+        .corner_radius(16.0)
+        .min_size(egui::vec2(0.0, 32.0));
+    ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Recuadro de dato (Batería, Temperatura…)
+fn tile(ui: &mut egui::Ui, w: f32, icon: &str, title: &str, value: &str, accent: egui::Color32) {
+    egui::Frame::new()
+        .fill(theme::alpha(egui::Color32::WHITE, 0.05))
+        .stroke(egui::Stroke::new(1.0, theme::alpha(accent, 0.25)))
+        .corner_radius(14.0)
+        .inner_margin(egui::Margin { left: 12, right: 8, top: 10, bottom: 10 })
+        .show(ui, |ui| {
+            ui.set_width(w - 20.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.add(egui::Label::new(txt(format!("{icon}  {title}"), 11.0, theme::SUBTEXT)).truncate());
+                ui.add(egui::Label::new(txt(value, 16.0, accent).strong()).truncate());
+            });
+        });
 }
 
 impl eframe::App for Panel {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let (st, md) = {
-            let d = self.data.lock().unwrap();
-            (d.status.clone(), d.media.clone())
+        let (st, md, alm, preview) = {
+            let mut d = self.data.lock().unwrap();
+            let pv = if d.preview_gen != self.tex_gen { self.tex_gen = d.preview_gen; Some(d.preview.take()) } else { None };
+            (d.status.clone(), d.media.clone(), d.almacen.clone(), pv)
         };
-        let connected = st["connected"].as_bool().unwrap_or(false);
-        let (cam, mic) = (md["cam"].as_bool().unwrap_or(false), md["mic"].as_bool().unwrap_or(false));
         let ctx = ui.ctx().clone();
-        let pending = st.get("pending").map(|p| !p.is_null()).unwrap_or(false);
-        self.fit(&ctx, connected, pending);
-
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(12.0)).show(ui, |ui| {
-            if self.mini {
-                ui.horizontal(|ui| {
-                    let dot = if connected { theme::GREEN } else { theme::MUTED };
-                    ui.label(txt("\u{F011C}", 18.0, dot));
-                    if connected {
-                        if toggle(ui, "\u{F0100}", cam, 36.0) {
-                            send(self.media_port, "/set?cam=toggle".into());
-                        }
-                        if toggle(ui, "\u{F036C}", mic, 36.0) {
-                            send(self.media_port, "/set?mic=toggle".into());
-                        }
-                    } else {
-                        ui.label(txt("Escritorio", 14.0, theme::FG));
+        if let Some(pv) = preview {
+            match pv {
+                Some(px) => {
+                    let img = egui::ColorImage::from_rgb([crate::devices::PREVIEW_W, crate::devices::PREVIEW_H], &px);
+                    match self.tex.as_mut() {
+                        Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                        None => self.tex = Some(ctx.load_texture("camara", img, egui::TextureOptions::LINEAR)),
                     }
-                    if ui.add(egui::Button::new(txt("\u{F0140}", 16.0, theme::FG)).fill(theme::SURFACE).min_size(egui::vec2(32.0, 32.0))).clicked() {
-                        self.mini = false;
-                    }
-                });
-                return;
+                }
+                None => self.tex = None,
             }
+        }
+        let connected = st["connected"].as_bool().unwrap_or(false);
+        if !connected {
+            self.dark = false;
+        }
+        let (cam, mic) = (md["cam"].as_bool().unwrap_or(false), md["mic"].as_bool().unwrap_or(false));
+        let ph = &st["phone"];
+        let peer = &st["peer"];
+        let via = if peer["via"].as_str() == Some("cable") { "por cable" } else { "por wifi" };
 
-            ui.horizontal(|ui| {
-                ui.label(txt("\u{F011C}  Escritorio", 18.0, theme::FG));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new(txt("\u{F0143}", 16.0, theme::FG)).fill(theme::SURFACE)).on_hover_text("Encoger").clicked() {
-                        self.mini = true;
-                    }
-                });
+        let inner = egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(14.0)).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
+            ui.vertical(|ui| {
+            ui.vertical(|ui| {
+                // Cabecera
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let name = ph["device"].as_str().or(peer["device"].as_str()).unwrap_or("Móvil");
+                ui.label(txt(name, 15.0, theme::TEXT).strong());
+                if connected {
+                    ui.label(txt(format!("Conectado {via} · cifrado"), 11.0, theme::GREEN));
+                } else {
+                    ui.label(txt("Sin conectar · ábrelo desde la app «Escritorio» del móvil", 11.0, theme::SUBTEXT));
+                }
             });
-            ui.add_space(8.0);
 
             // móvil que pide conectarse
             if let Some(p) = st.get("pending").filter(|p| !p.is_null()) {
-                egui::Frame::new().fill(theme::SURFACE).corner_radius(12.0).inner_margin(10.0).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(txt(format!("{} quiere conectarse", p["device"].as_str().unwrap_or("Un móvil")), 15.0, theme::YELLOW));
-                    ui.label(txt(format!("Huella {} · por {}", p["fp"].as_str().unwrap_or("?"), p["via"].as_str().unwrap_or("?")), 13.0, theme::MUTED));
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let id = p["id"].as_str().unwrap_or("").to_string();
-                        if ui.add(egui::Button::new(txt("Aceptar", 14.0, theme::BG)).fill(theme::GREEN).min_size(egui::vec2(120.0, 34.0))).clicked() {
-                            send(self.answer_port, format!("/answer?id={id}&ok=1"));
-                        }
-                        if ui.add(egui::Button::new(txt("Rechazar", 14.0, theme::BG)).fill(theme::RED).min_size(egui::vec2(120.0, 34.0))).clicked() {
-                            send(self.answer_port, format!("/answer?id={id}&ok=0"));
-                        }
+                egui::Frame::new()
+                    .fill(theme::alpha(theme::YELLOW, 0.08))
+                    .stroke(egui::Stroke::new(1.0, theme::alpha(theme::YELLOW, 0.35)))
+                    .corner_radius(14.0)
+                    .inner_margin(12.0)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(txt(format!("{} quiere conectarse", p["device"].as_str().unwrap_or("Un móvil")), 14.0, theme::YELLOW).strong());
+                        ui.label(txt(format!("Huella {} · por {}", p["fp"].as_str().unwrap_or("?"), p["via"].as_str().unwrap_or("?")), 11.0, theme::SUBTEXT));
+                        ui.horizontal(|ui| {
+                            let id = p["id"].as_str().unwrap_or("").to_string();
+                            if pill(ui, "\u{F012C}", "Aceptar", true, theme::GREEN) {
+                                send(self.answer_port, format!("/answer?id={id}&ok=1"));
+                            }
+                            if pill(ui, "\u{F0156}", "Rechazar", true, theme::RED) {
+                                send(self.answer_port, format!("/answer?id={id}&ok=0"));
+                            }
+                        });
                     });
-                });
-                ui.add_space(8.0);
-            }
-
-            if !connected && pending {
-                return;
             }
             if !connected {
-                ui.label(txt("Sin móvil conectado", 15.0, theme::MUTED));
-                ui.add_space(4.0);
-                ui.label(txt("Abre la app Escritorio en el móvil y elige este ordenador.", 13.0, theme::MUTED));
                 return;
             }
 
-            let peer = &st["peer"];
-            let ph = &st["phone"];
-            ui.label(txt(format!("{} · por {}", peer["device"].as_str().unwrap_or("Móvil"), peer["via"].as_str().unwrap_or("?")), 15.0, theme::GREEN));
-            if let Some(l) = ph["level"].as_i64() {
-                let carga = if ph["charging"].as_bool().unwrap_or(false) { " · cargando" } else { "" };
-                ui.label(txt(format!("Batería {l} %{carga}"), 13.0, theme::MUTED));
-            }
-            ui.add_space(10.0);
-            let w = (ui.available_width() - 8.0) / 2.0;
+            // Datos
+            let w = ((W - 28.0) - 8.0) / 2.0;
+            let level = ph["level"].as_i64().filter(|l| *l >= 0);
+            let charging = ph["charging"].as_bool().unwrap_or(false);
             ui.horizontal(|ui| {
-                if toggle(ui, &format!("\u{F0100}  Cámara{}", if cam { " sí" } else { "" }), cam, w) {
-                    send(self.media_port, "/set?cam=toggle".into());
+                tile(ui, w, if charging { "\u{F0084}" } else { "\u{F0079}" }, "Batería",
+                     &level.map(|l| format!("{l}%{}", if charging { " ⚡" } else { "" })).unwrap_or("—".into()),
+                     if level.unwrap_or(100) < 15 && !charging { theme::RED } else { theme::GREEN });
+                let t = ph["cpu_temp"].as_f64().filter(|t| *t > 0.0).or(ph["btemp"].as_f64());
+                tile(ui, w, "\u{F050F}", "Temperatura", &t.map(|t| format!("{} °C", t.round())).unwrap_or("—".into()), theme::SKY);
+            });
+            ui.horizontal(|ui| {
+                let (tot, free) = (ph["stotal"].as_f64().unwrap_or(0.0), ph["sfree"].as_f64().unwrap_or(0.0));
+                let used = if tot > 0.0 { format!("{}% usado", ((tot - free) / tot * 100.0).round()) } else { "—".into() };
+                tile(ui, w, "\u{F02CA}", "Almacenamiento", &used, theme::LAVENDER);
+                tile(ui, w, "\u{F024B}", "~/Móvil", if alm.is_empty() { "—" } else { &alm }, theme::YELLOW);
+            });
+
+            // Brillo
+            ui.horizontal(|ui| {
+                ui.label(txt("\u{F00DE}", 15.0, theme::YELLOW));
+                let phone_b = ph["brightness"].as_f64().filter(|b| *b >= 0.0).unwrap_or(0.6) as f32;
+                let mut b = self.bright.unwrap_or(phone_b);
+                ui.spacing_mut().slider_width = W - 28.0 - 30.0;
+                let r = ui.add(egui::Slider::new(&mut b, 0.02..=1.0).show_value(false).trailing_fill(true));
+                if r.changed() {
+                    self.bright = Some(b);
+                    if self.bright_sent.elapsed() > Duration::from_millis(80) {
+                        self.bright_sent = std::time::Instant::now();
+                        send(self.answer_port, format!("/brightness?v={b:.2}"));
+                    }
                 }
-                if toggle(ui, "\u{F0450}  Girar", false, w) {
-                    send(self.media_port, "/set?facing=flip".into());
+                if r.drag_stopped() {
+                    send(self.answer_port, format!("/brightness?v={b:.2}"));
+                }
+                if !r.dragged() && !r.changed() && (phone_b - b).abs() < 0.02 {
+                    self.bright = None;
                 }
             });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if toggle(ui, &format!("\u{F036C}  Micro{}", if mic { " sí" } else { "" }), mic, w) {
-                    send(self.media_port, "/set?mic=toggle".into());
+
+            // Pantalla / stand-by / archivos
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if pill(ui, "\u{F0425}", if self.dark { "Apagada" } else { "Pantalla" }, !self.dark, theme::YELLOW) {
+                    self.dark = !self.dark;
+                    send(self.answer_port, format!("/screen?on={}", if self.dark { 0 } else { 1 }));
                 }
-                let sb = st["standby"].as_bool().unwrap_or(false);
-                if toggle(ui, "\u{F0594}  Stand-by", sb, w) {
+                if pill(ui, "\u{F04B2}", "Stand-by", st["standby"].as_bool().unwrap_or(false), theme::LAVENDER) {
                     send(self.answer_port, "/standby?on=toggle".into());
                 }
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if toggle(ui, "\u{F0425}  Pantalla", false, w) {
-                    // alterna apagada/encendida (el servicio no guarda el estado: se apaga, y otro clic enciende)
-                    self.screen_off = !self.screen_off;
-                    let off = self.screen_off;
-                    send(self.answer_port, format!("/screen?on={}", if off { 0 } else { 1 }));
-                }
-                let b = egui::Button::new(txt("Desconectar", 14.0, theme::BG)).fill(theme::RED).corner_radius(10.0).min_size(egui::vec2(w, 36.0));
-                if ui.add(b).clicked() {
-                    send(self.answer_port, "/disconnect".into());
+                if pill(ui, "\u{F024B}", "Archivos", false, theme::YELLOW) {
+                    let _ = std::process::Command::new("xdg-open").arg(movil_dir()).spawn();
                 }
             });
-            if let Some(e) = md["error"].as_str().filter(|e| !e.is_empty()) {
-                ui.add_space(8.0);
-                ui.label(txt(e, 12.0, theme::YELLOW));
+
+            // Cámara y micrófono
+            ui.label(txt("Cámara y micrófono", 12.0, theme::SUBTEXT));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if pill(ui, if cam { "\u{F0100}" } else { "\u{F05DF}" }, "Cámara", cam, theme::RED) {
+                    send(self.media_port, format!("/set?cam={}", if cam { "off" } else { "on" }));
+                }
+                let trasera = md["facing"].as_str() == Some("environment");
+                if pill(ui, "\u{F0D19}", if trasera { "Trasera" } else { "Frontal" }, false, theme::BLUE) {
+                    send(self.media_port, "/set?facing=flip".into());
+                }
+                if pill(ui, if mic { "\u{F036C}" } else { "\u{F036D}" }, "Micrófono", mic, theme::RED) {
+                    send(self.media_port, format!("/set?mic={}", if mic { "off" } else { "on" }));
+                }
+            });
+            if cam {
+                let size = egui::vec2(W - 28.0, (W - 28.0) * 9.0 / 16.0);
+                match &self.tex {
+                    Some(t) => {
+                        ui.add(egui::Image::new(t).fit_to_exact_size(size).corner_radius(12.0));
+                    }
+                    None => {
+                        egui::Frame::new().fill(theme::alpha(egui::Color32::WHITE, 0.05)).corner_radius(12.0).show(ui, |ui| {
+                            ui.set_min_size(size);
+                            ui.centered_and_justified(|ui| ui.label(txt("Encendiendo la cámara…", 12.0, theme::SUBTEXT)));
+                        });
+                    }
+                }
             }
+            if let Some(e) = md["error"].as_str().filter(|e| !e.is_empty()) {
+                ui.label(txt(e, 11.0, theme::PEACH));
+            }
+
+            if pill(ui, "\u{F0156}", "Desconectar", false, theme::RED) {
+                send(self.answer_port, "/disconnect".into());
+            }
+            }).response.rect.height()
         });
+        // la ventana se ajusta a lo que enseña
+        let content_h = (inner.inner + 28.0).round();
+        if (content_h - self.height).abs() > 1.0 {
+            self.height = content_h;
+            // (en Wayland una ventana "no redimensionable" queda clavada a su primer tamaño: se fijan
+            // a la vez el mínimo, el máximo y el tamaño)
+            let sz = egui::vec2(W, content_h);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(sz));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(sz));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(sz));
+        }
     }
 }
 
@@ -266,8 +408,8 @@ pub fn run() -> Result<(), String> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Escritorio")
             .with_app_id("pantalla-host")
-            .with_inner_size([W, 120.0])
-            .with_resizable(false),
+            .with_inner_size([W, 200.0])
+            .with_resizable(true),
         ..Default::default()
     };
     let r = eframe::run_native("Escritorio", opts, Box::new(|cc| {

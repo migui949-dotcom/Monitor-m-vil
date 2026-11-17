@@ -47,9 +47,11 @@ Desinstalar: `pantalla-host desinstalar`. Estado: `pantalla-host info`.
 
 ## Instalar la app en el móvil
 
-Compila `app/` con `app/build.sh` (Rust + NDK, sin Gradle) e instala el APK. Al abrirla por primera vez
-pide los permisos (cámara/micrófono, "bloquear internet" con su cortafuegos propio, y que Android no la
-cierre).
+Descarga [`dist/escritorio-android.apk`](dist/) en el móvil y ábrelo (Android pedirá permitir instalar
+apps de esa fuente). Al abrirla por primera vez pide los permisos (cámara/micrófono, "bloquear
+internet" con su cortafuegos propio, y que Android no la cierre).
+
+Para compilarla tú: `app/build.sh` (Rust + NDK, sin Gradle).
 
 ## Compilar
 

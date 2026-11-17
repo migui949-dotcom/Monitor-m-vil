@@ -190,7 +190,11 @@ impl Camera {
                         match codec.0.dequeue_output_buffer(Duration::from_millis(20)) {
                             Ok(DequeuedOutputBufferInfoResult::Buffer(b)) => {
                                 let flags = b.info().flags();
-                                let data = b.buffer().to_vec();
+                                // solo la parte válida: buffer() devuelve el búfer entero (~1,3 MB a
+                                // 1280x720) y se mandaba todo, relleno incluido (23-110 Mbit/s, 2 fps)
+                                let (off, size) = (b.info().offset().max(0) as usize, b.info().size().max(0) as usize);
+                                let all = b.buffer();
+                                let data = all[off.min(all.len())..(off + size).min(all.len())].to_vec();
                                 let _ = codec.0.release_output_buffer(b, false);
                                 if flags & 2 != 0 { config = data; continue; }      // BUFFER_FLAG_CODEC_CONFIG
                                 let pkt = if flags & 1 != 0 && !config.is_empty() { [config.as_slice(), &data].concat() } else { data };

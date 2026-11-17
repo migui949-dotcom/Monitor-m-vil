@@ -1083,6 +1083,9 @@ async fn adb_watch(port: u16) {
 
 /// Deja el sistema limpio: sin monitor del móvil ni salidas de sonido.
 fn cleanup() {
+    if util::test_mode() {
+        return; // lo que hay es del servicio de verdad
+    }
     #[cfg(target_os = "linux")]
     {
         crate::linux::ensure_env();

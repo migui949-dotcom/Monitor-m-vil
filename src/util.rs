@@ -99,7 +99,14 @@ pub const MAX_PHONES: u8 = 4;
 
 /// Nombre de la salida (monitor virtual) de la ranura `s`
 pub fn output_name(s: u8) -> String {
-    if s <= 1 { "MOVIL".into() } else { format!("MOVIL-{s}") }
+    // instancia de prueba (PANTALLA_TEST=1): otros nombres, para no pisar los monitores del servicio de verdad
+    let base = if test_mode() { "PRUEBA" } else { "MOVIL" };
+    if s <= 1 { base.into() } else { format!("{base}-{s}") }
+}
+
+/// PANTALLA_TEST=1: instancia de prueba al lado del servicio de verdad (no limpia lo de este ni lo pisa)
+pub fn test_mode() -> bool {
+    std::env::var("PANTALLA_TEST").as_deref() == Ok("1")
 }
 
 /// ¿Es el monitor de algún móvil? (MOVIL, MOVIL-2…; en KWin "Virtual-MOVIL…")

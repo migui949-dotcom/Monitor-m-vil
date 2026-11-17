@@ -25,6 +25,8 @@ mod audio;
 #[cfg(target_os = "linux")]
 mod devices;
 #[cfg(target_os = "linux")]
+mod hwenc;
+#[cfg(target_os = "linux")]
 mod kde;
 #[cfg(target_os = "linux")]
 mod linux;

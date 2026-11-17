@@ -3,7 +3,6 @@
 //! Responde a cada FramebufferUpdateRequest con un rectángulo H.264 de todo el monitor.
 
 use crate::display::Display;
-use crate::video::H264;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -119,7 +118,7 @@ pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSend
     std::thread::Builder::new()
         .name("rfb-video".into())
         .spawn(move || {
-            let mut enc = match H264::new(w as usize, h as usize, fps) {
+            let mut enc = match crate::video::Encoder::new(w as usize, h as usize, fps) {
                 Ok(e) => e,
                 Err(e) => {
                     crate::host::log(&format!("vídeo: {e}"));
@@ -128,6 +127,7 @@ pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSend
                 }
             };
             let (ew, eh) = enc.size();
+            crate::host::log(&format!("vídeo: {}x{} con {}", ew, eh, enc.name()));
             let mut last_seq = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 // espera una petición

@@ -9,6 +9,7 @@ pub enum PixelOrder {
     /// bytes B,G,R,X (wl_shm XRGB8888/ARGB8888, DXGI B8G8R8A8)
     Bgrx,
     /// bytes R,G,B,X (wl_shm XBGR8888/ABGR8888)
+    #[allow(dead_code)] // solo Linux
     Rgbx,
 }
 

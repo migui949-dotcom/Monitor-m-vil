@@ -114,6 +114,10 @@ pub fn fingerprint(key: &[u8]) -> String {
     format!("{}-{}", &h[..4], &h[4..])
 }
 
+pub fn fingerprint_self() -> String {
+    fingerprint(&ident().public)
+}
+
 pub fn host_name() -> String {
     if let Ok(n) = std::env::var("MOVILD_NAME") {
         return n;
@@ -542,6 +546,9 @@ async fn session(
     } else {
         None
     };
+    #[cfg(windows)]
+    let _speakers = if want.iter().any(|w| w == "audio") { crate::winaudio::Speakers::start(out_tx.clone()) } else { None };
+
     // Canal 5: almacén del móvil → ~/Móvil (FUSE)
     #[cfg(target_os = "linux")]
     let (store, fuse) = if want.iter().any(|w| w == "storage") {

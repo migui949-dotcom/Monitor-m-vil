@@ -1,0 +1,8 @@
+# Windows: todo dentro del .exe (sin libstdc++-6.dll / libgcc / winpthread).
+# OpenH264 es C++: el crate cc enlazaría libstdc++ como DLL; se quita (CXXSTDLIB vacío) y se enlaza estática.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=-static",
+             "-L", "native=/usr/lib/gcc/x86_64-w64-mingw32/14-win32", "-l", "static=stdc++"]
+
+[env]
+CXXSTDLIB_x86_64_pc_windows_gnu = ""

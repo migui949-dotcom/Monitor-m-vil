@@ -28,6 +28,16 @@ Compilar: `cargo build --release` y `cargo build --release --target x86_64-pc-wi
   en el monitor del móvil, permiso por .desktop sí/no. Falta probarlo en una sesión Plasma de verdad con el móvil.
 - El ordenador manda `screen_error` en `accepted` y la app lo enseña si no hay escritorio.
 
+## Webcam siempre visible (2026-11-17, en el sistema de movild)
+Chrome/Meet/Discord solo listan una v4l2loopback con exclusive_caps=1 mientras alguien escribe, y la pierden si
+cambia el escritor. `webcam.py` (servicio de usuario movil-webcam) es el único escritor de /dev/video42: imagen de
+espera a 5 fps o las imágenes que manda media.py por un FIFO, siempre 1280x720 (vertical con bandas).
+`activar-webcam.sh` (sudo) instala/configura v4l2loopback (video_nr=42 exclusive_caps=1). Al portar la cámara a
+pantalla-host hay que hacer lo mismo.
+
+## Lanzador
+`pantalla-host menu` (fuzzel/rofi/wofi/tofi/bemenu/dmenu, MENU= en host.conf) y `instalar --solo-menu`.
+
 ## Siguiente: cámara
 Protocolo actual (movild.py + media.py):
 - Encender/apagar: control `{"t":"media","cam":bool,"mic":bool,"facing":"user"|"environment"}` hacia la app;

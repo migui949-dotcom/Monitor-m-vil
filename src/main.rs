@@ -27,6 +27,8 @@ mod kde;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+mod menu;
+#[cfg(target_os = "linux")]
 mod panel;
 #[cfg(target_os = "linux")]
 mod pw;
@@ -67,6 +69,14 @@ fn main() {
         }
         "instalar" | "install" => {
             let replace = args.iter().any(|a| a == "--sustituir-movild");
+            #[cfg(target_os = "linux")]
+            if args.iter().any(|a| a == "--solo-menu") {
+                if let Err(e) = install::install_menu() {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             match install::install(replace) {
                 Ok(()) => {
                     #[cfg(windows)]
@@ -78,6 +88,13 @@ fn main() {
                     windows::message("Pantalla", &format!("No se pudo instalar: {e}"));
                     std::process::exit(1);
                 }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        "menu" => {
+            if let Err(e) = menu::run() {
+                eprintln!("menú: {e}");
+                std::process::exit(1);
             }
         }
         #[cfg(target_os = "linux")]
@@ -106,7 +123,7 @@ fn main() {
             serve()
         }
         _ => {
-            eprintln!("uso: pantalla-host [instalar [--sustituir-movild] | desinstalar | panel | info | --version]");
+            eprintln!("uso: pantalla-host [instalar [--sustituir-movild | --solo-menu] | desinstalar | menu | panel | info | --version]");
             std::process::exit(2);
         }
     }

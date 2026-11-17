@@ -37,21 +37,7 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
     // declaran en su .desktop (se busca por la ruta del ejecutable)
     let apps = home().join(".local/share/applications");
     std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
-    // Un solo .desktop: el lanzador "Escritorio" (abre el panel) y, para KWin, el permiso (KWin lo
-    // busca por la ruta del ejecutable, la primera palabra de Exec)
-    let icons = home().join(".local/share/icons/hicolor/scalable/apps");
-    let _ = std::fs::create_dir_all(&icons);
-    let _ = std::fs::write(icons.join("escritorio-movil.svg"), include_str!("../app/icono.svg"));
-    std::fs::write(
-        apps.join("pantalla-host.desktop"),
-        format!(
-            "[Desktop Entry]\nType=Application\nName=Escritorio\nComment=Usar el móvil como pantalla: cámara, micro y conexión\n\
-             Exec={} panel\nIcon=escritorio-movil\nCategories=Utility;\nX-KDE-Wayland-Interfaces={}\n",
-            dest.display(),
-            crate::kde::INTERFACES
-        ),
-    )
-    .map_err(|e| e.to_string())?;
+    write_launcher(&dest)?;
     run("kbuildsycoca6", &["--noincremental"]);
     let unit_dir = home().join(".config/systemd/user");
     std::fs::create_dir_all(&unit_dir).map_err(|e| e.to_string())?;
@@ -85,6 +71,47 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
         let _ = Command::new(&dest).arg("panel").stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
     }
+    Ok(())
+}
+
+/// Lanzador "Escritorio" (menú en fuzzel/rofi/wofi; acción "Panel") + icono. El mismo .desktop da a
+/// KWin el permiso del monitor virtual (lo busca por la ruta del ejecutable, la primera palabra de Exec).
+#[cfg(target_os = "linux")]
+fn write_launcher(dest: &std::path::Path) -> Result<(), String> {
+    let apps = home().join(".local/share/applications");
+    std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+    let icons = home().join(".local/share/icons/hicolor/scalable/apps");
+    let _ = std::fs::create_dir_all(&icons);
+    let _ = std::fs::write(icons.join("escritorio-movil.svg"), include_str!("../app/icono.svg"));
+    std::fs::write(
+        apps.join("pantalla-host.desktop"),
+        format!(
+            "[Desktop Entry]\nType=Application\nName=Escritorio\nGenericName=Móvil como pantalla\n\
+             Comment=Cámara, micro, brillo y conexión del móvil\nKeywords=movil;móvil;camara;cámara;microfono;brillo;desconectar;\n\
+             Exec={d} menu\nIcon=escritorio-movil\nCategories=Utility;\nActions=panel;\n\
+             X-KDE-Wayland-Interfaces={i}\n\n[Desktop Action panel]\nName=Abrir el panel\nExec={d} panel\n",
+            d = dest.display(),
+            i = crate::kde::INTERFACES
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// `instalar --solo-menu`: solo el binario y el lanzador (para equipos que siguen con movild)
+#[cfg(target_os = "linux")]
+pub fn install_menu() -> Result<(), String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let bin_dir = home().join(".local/bin");
+    let dest = bin_dir.join("pantalla-host");
+    std::fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+    if me != dest {
+        let tmp = bin_dir.join(".pantalla-host.nuevo");
+        std::fs::copy(&me, &tmp).map_err(|e| format!("copiar: {e}"))?;
+        std::fs::rename(&tmp, &dest).map_err(|e| format!("copiar: {e}"))?;
+    }
+    write_launcher(&dest)?;
+    println!("Lanzador \"Escritorio\" instalado ({} menu). El servicio no se toca.", dest.display());
     Ok(())
 }
 

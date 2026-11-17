@@ -23,6 +23,8 @@ pub struct Identity {
 }
 
 static IDENT: OnceLock<Identity> = OnceLock::new();
+/// origen de tiempos de los ecos (el mismo para todas las sesiones)
+static ECHO_T0: OnceLock<std::time::Instant> = OnceLock::new();
 static STATE: OnceLock<Mutex<St>> = OnceLock::new();
 
 /// Un móvil conectado (una "ranura": 1, 2…; la 1 usa los nombres de siempre)
@@ -49,8 +51,10 @@ struct Sess {
     media_error: String,
     /// por qué este móvil no tiene webcam en el ordenador (si no la tiene)
     cam_unavailable: Option<String>,
-    /// vídeo del escritorio: compresor, imágenes/s, ms por imagen
+    /// vídeo del escritorio: compresor, imágenes/s, ms por imagen…
     video: Option<Arc<crate::rfb::Stats>>,
+    /// ida y vuelta por la red (eco que contesta la app ≥ 2.1), ms
+    rtt_ms: Option<f32>,
     #[cfg(target_os = "linux")]
     mic: Option<crate::audio::Mic>,
 }
@@ -135,7 +139,12 @@ fn session_json(slot: u8, s: &Sess) -> Value {
            "peer": s.peer, "since": s.since, "phone": s.phone, "standby": s.standby,
            "position": util::position(slot), "ws": util::phone_workspace(slot), "storage": s.storage,
            "sink": sink, "media": media_json(slot, s),
-           "video": s.video.as_ref().map(|v| { let (e, fps, ms) = v.get(); json!({"encoder": e, "fps": (fps * 10.0).round() / 10.0, "ms": (ms * 10.0).round() / 10.0}) })})
+           "video": s.video.as_ref().map(|v| {
+               let r = |x: f32| ((x as f64) * 10.0).round() / 10.0;
+               let i = v.get();
+               json!({"encoder": i.encoder, "fps": r(i.fps), "ms": r(i.ms), "age_ms": r(i.age_ms), "kbps": i.kbps.round(),
+                      "rtt_ms": s.rtt_ms.map(r)})
+           })})
 }
 
 fn write_status() {
@@ -834,11 +843,15 @@ async fn session(
         let stats = Arc::new(crate::rfb::Stats::default());
         with_sess(slot, |x| x.video = Some(stats.clone()));
         crate::rfb::spawn(d.clone(), in_rx, v_tx, stop.clone(), 60.0, stats.clone());
-        // el panel ve fps/ms al momento: cada 3 s se reescribe el estado mientras dura la sesión
+        // el panel ve fps/ms al momento: cada 3 s se reescribe el estado mientras dura la sesión, y se
+        // manda un eco a la app para medir la ida y vuelta por la red (la app ≥ 2.1 lo devuelve tal cual)
         {
-            let stop = stop.clone();
+            let (stop, out) = (stop.clone(), out_tx.clone());
             tokio::spawn(async move {
+                let t0 = *ECHO_T0.get_or_init(std::time::Instant::now);
                 while !stop.load(Ordering::Relaxed) {
+                    let ts = t0.elapsed().as_micros() as u64;
+                    let _ = out.send((0, json!({"t": "echo", "ts": ts, "host": true}).to_string().into_bytes()));
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     if stop.load(Ordering::Relaxed) {
                         break;
@@ -921,6 +934,16 @@ async fn session(
                 let m: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
                 match m.get("t").and_then(|t| t.as_str()).unwrap_or("") {
                     "log" => app_log(m.get("lines").and_then(|l| l.as_array()).map(|v| v.as_slice()).unwrap_or(&[])),
+                    "echo" => {
+                        // eco de la app: ida y vuelta por la red
+                        if let (Some(ts), Some(t0)) = (m["ts"].as_u64(), ECHO_T0.get()) {
+                            let now = t0.elapsed().as_micros() as u64;
+                            if now >= ts {
+                                let ms = (now - ts) as f32 / 1000.0;
+                                with_sess(slot, |x| x.rtt_ms = Some(ms));
+                            }
+                        }
+                    }
                     "ping" => {
                         let _ = out_tx.send((0, br#"{"t": "pong"}"#.to_vec()));
                     }

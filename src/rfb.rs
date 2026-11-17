@@ -43,14 +43,27 @@ struct Req {
     h264: bool,
 }
 
-/// Lo que se ve del vídeo de una sesión (para los paneles): compresor, imágenes/s y ms por imagen
+/// Lo que se ve del vídeo de una sesión (para los paneles)
+#[derive(Default, Clone)]
+pub struct VideoInfo {
+    pub encoder: String,
+    /// imágenes enviadas por segundo
+    pub fps: f32,
+    /// ms de compresión por imagen
+    pub ms: f32,
+    /// ms desde que se capturó la imagen hasta que sale hacia la red (espera + compresión)
+    pub age_ms: f32,
+    /// kbit/s de vídeo
+    pub kbps: f32,
+}
+
 #[derive(Default)]
 pub struct Stats {
-    pub inner: Mutex<(String, f32, f32)>,
+    pub inner: Mutex<VideoInfo>,
 }
 
 impl Stats {
-    pub fn get(&self) -> (String, f32, f32) {
+    pub fn get(&self) -> VideoInfo {
         self.inner.lock().unwrap().clone()
     }
 }
@@ -140,8 +153,8 @@ pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSend
             };
             let (ew, eh) = enc.size();
             crate::host::log(&format!("vídeo: {}x{} con {}", ew, eh, enc.name()));
-            *stats.inner.lock().unwrap() = (enc.name().to_string(), 0.0, 0.0);
-            let (mut n, mut ms_sum, mut t_win) = (0u32, 0f32, std::time::Instant::now());
+            *stats.inner.lock().unwrap() = VideoInfo { encoder: enc.name().to_string(), ..Default::default() };
+            let (mut n, mut ms_sum, mut age_sum, mut bytes, mut t_win) = (0u32, 0f32, 0f32, 0usize, std::time::Instant::now());
             let mut last_seq = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 // espera una petición
@@ -180,10 +193,19 @@ pub fn spawn(display: Arc<dyn Display>, rx: Receiver<Vec<u8>>, tx: UnboundedSend
                 last_seq = frame.seq;
                 n += 1;
                 ms_sum += t_enc.elapsed().as_secs_f32() * 1000.0;
+                age_sum += frame.at.elapsed().as_secs_f32() * 1000.0;
+                bytes += data.len();
                 let el = t_win.elapsed().as_secs_f32();
                 if el >= 2.0 {
-                    *stats.inner.lock().unwrap() = (enc.name().to_string(), n as f32 / el, if n > 0 { ms_sum / n as f32 } else { 0.0 });
-                    (n, ms_sum, t_win) = (0, 0.0, std::time::Instant::now());
+                    let k = n.max(1) as f32;
+                    *stats.inner.lock().unwrap() = VideoInfo {
+                        encoder: enc.name().to_string(),
+                        fps: n as f32 / el,
+                        ms: ms_sum / k,
+                        age_ms: age_sum / k,
+                        kbps: bytes as f32 * 8.0 / 1000.0 / el,
+                    };
+                    (n, ms_sum, age_sum, bytes, t_win) = (0, 0.0, 0.0, 0, std::time::Instant::now());
                 }
                 if data.is_empty() {
                     continue;

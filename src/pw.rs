@@ -321,7 +321,7 @@ unsafe extern "C" fn on_process(d: Ptr) {
         if !data.data.is_null() && chunk.flags & 1 == 0 && chunk.size as usize >= need && w > 0 {
             let off = (chunk.offset % data.maxsize.max(1)) as usize;
             let src = std::slice::from_raw_parts((data.data as *const u8).add(off), need);
-            s.slot.publish(Frame { width: w, height: h, stride, order: s.order, data: src.to_vec(), seq: 0 });
+            s.slot.publish(Frame { width: w, height: h, stride, order: s.order, data: src.to_vec(), seq: 0, at: std::time::Instant::now() });
         }
     }
     (s.lib.stream_queue)(s.stream, last);

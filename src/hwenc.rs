@@ -115,18 +115,21 @@ impl HwEnc {
         a.extend([
             "-f", "rawvideo", "-pix_fmt", "bgr0", "-s", &format!("{w}x{h}"), "-framerate", &format!("{fps}"), "-i", "pipe:0",
         ].map(String::from));
-        let rate = [format!("{bps}"), format!("{}", bps / 2)];
+        // Tasa según lo que cambia la pantalla, con techo `bps` (antes: CBR fijo, que gastaba ~7,5 Mbit/s
+        // siempre). Medido con NVENC en scroll real: CBR 7,5 Mbit/s PSNR 48,7 → cq 28 1,2 Mbit/s PSNR 44,6.
+        // VAAPI: VBR (lo soportan todos los Intel/AMD) con objetivo al 40 % del techo.
+        let rate = [format!("{bps}"), format!("{}", bps / 2), format!("{}", bps * 2 / 5)];
         match self.kind {
             Kind::Vaapi | Kind::VaapiLp => a.extend([
                 "-vf", "format=bgr0,hwupload,scale_vaapi=format=nv12:out_color_matrix=smpte170m:out_range=tv",
                 "-c:v", "h264_vaapi", "-low_power", if self.kind == Kind::VaapiLp { "1" } else { "0" },
                 "-async_depth", "1", "-profile:v", "constrained_baseline", "-bf", "0", "-g", "100000",
-                "-rc_mode", "CBR", "-b:v", &rate[0], "-bufsize", &rate[1],
+                "-rc_mode", "VBR", "-b:v", &rate[2], "-maxrate", &rate[0], "-bufsize", &rate[1],
             ].map(String::from)),
             Kind::Nvenc => a.extend([
                 "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull", "-zerolatency", "1", "-delay", "0",
                 "-profile:v", "baseline", "-bf", "0", "-g", "100000", "-forced-idr", "1",
-                "-rc", "cbr", "-b:v", &rate[0], "-bufsize", &rate[1],
+                "-rc", "vbr", "-cq", "26", "-b:v", "0", "-maxrate", &rate[0], "-bufsize", &rate[1],
             ].map(String::from)),
         }
         a.extend(["-flush_packets", "1", "-f", "rtp", &format!("rtp://127.0.0.1:{port}?pkt_size=1400")].map(String::from));

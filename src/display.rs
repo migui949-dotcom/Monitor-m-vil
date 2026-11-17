@@ -20,6 +20,8 @@ pub struct Frame {
     pub order: PixelOrder,
     pub data: Vec<u8>,
     pub seq: u64,
+    /// cuándo se capturó (para medir cuánto tarda en salir hacia el móvil)
+    pub at: Instant,
 }
 
 pub trait Display: Send + Sync {

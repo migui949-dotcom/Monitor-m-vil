@@ -586,7 +586,7 @@ fn capture_loop(name: &str, slot: &FrameSlot, stop: &AtomicBool) -> Result<(), E
         } else {
             data.copy_from_slice(&b.map[..stride * h]);
         }
-        slot.publish(Frame { width: w, height: h, stride, order, data, seq: 0 });
+        slot.publish(Frame { width: w, height: h, stride, order, data, seq: 0, at: Instant::now() });
         // como mucho ~60 fotogramas por segundo
         let el = last.elapsed();
         if el < min_gap {

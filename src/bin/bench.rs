@@ -35,6 +35,8 @@ mod display {
         pub data: Vec<u8>,
         #[allow(dead_code)]
         pub seq: u64,
+        #[allow(dead_code)]
+        pub at: std::time::Instant,
     }
 }
 
@@ -55,7 +57,7 @@ fn main() {
     for i in 0..n {
         let off = (i * step) % h;
         let data = src[off * w * 4..(off + h) * w * 4].to_vec(); // la copia que hace la captura
-        let f = display::Frame { width: w, height: h, stride: w * 4, order: display::PixelOrder::Bgrx, data, seq: i as u64 };
+        let f = display::Frame { width: w, height: h, stride: w * 4, order: display::PixelOrder::Bgrx, data, seq: i as u64, at: Instant::now() };
         let t = Instant::now();
         let out = enc.encode(&f, i == 0).unwrap();
         if i == 0 {

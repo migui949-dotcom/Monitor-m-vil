@@ -227,7 +227,7 @@ fn capture_loop(name: &str, slot: &FrameSlot, stop: &AtomicBool) -> Result<(), S
                     let src = std::slice::from_raw_parts(m.pData as *const u8, pitch * h);
                     let data = src.to_vec();
                     ctx.Unmap(st, 0);
-                    Ok(Some(Frame { width: w, height: h, stride: pitch, order: PixelOrder::Bgrx, data, seq: 0 }))
+                    Ok(Some(Frame { width: w, height: h, stride: pitch, order: PixelOrder::Bgrx, data, seq: 0, at: std::time::Instant::now() }))
                 }
             })();
             unsafe { dup.ReleaseFrame().ok() };

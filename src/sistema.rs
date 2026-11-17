@@ -114,9 +114,10 @@ pub fn prepare() -> Result<(), String> {
         return Err("hace falta ser administrador: sudo pantalla-host preparar-sistema".into());
     }
     firewall();
-    webcam()?;
+    // la regla de las webcams al vuelo va siempre, aunque falle lo de v4l2loopback (se avisa al final)
+    let r = webcam();
     webcam_ctl();
-    Ok(())
+    r
 }
 
 /// Desde `instalar` (usuario normal): pide la contraseña una vez y lo prepara

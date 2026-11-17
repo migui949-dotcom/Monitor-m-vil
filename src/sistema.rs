@@ -57,7 +57,8 @@ fn firewall_closed() -> bool {
 }
 
 fn webcam() -> Result<(), String> {
-    let modinfo = || run("modinfo", &["v4l2loopback"]);
+    // cargado ya cuenta (tras actualizar el kernel sin reiniciar, modinfo no lo encuentra aunque funcione)
+    let modinfo = || std::path::Path::new("/sys/module/v4l2loopback").exists() || run("modinfo", &["v4l2loopback"]);
     if !modinfo() {
         println!("Instalando v4l2loopback (webcam virtual)…");
         let kernel = out("uname", &["-r"]).trim().to_string();

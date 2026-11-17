@@ -11,7 +11,7 @@ fn run(cmd: &str, args: &[&str]) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("HOME"))
 }
 
@@ -58,6 +58,9 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     if movild_active {
         run("systemctl", &["--user", "disable", "--now", "movild"]);
+        // cámara y micro de la versión en Python: pantalla-host los lleva él (misma webcam y fuente)
+        run("systemctl", &["--user", "disable", "--now", "movil-media"]);
+        run("systemctl", &["--user", "stop", "movil-vnc", "movil-audio"]);
         println!("movild parado y desactivado (sus archivos siguen ahí).");
     }
     run("systemctl", &["--user", "daemon-reload"]);
@@ -127,6 +130,7 @@ pub fn uninstall() -> Result<(), String> {
     // si estaba la versión en Python, se vuelve a ella
     if home().join(".config/systemd/user/movild.service").exists() {
         run("systemctl", &["--user", "enable", "--now", "movild"]);
+        let _ = run("systemctl", &["--user", "enable", "--now", "movil-media"]);
         println!("movild (versión en Python) reactivado.");
     }
     println!("Desinstalado.");

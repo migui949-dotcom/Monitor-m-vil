@@ -20,13 +20,14 @@ Dos piezas:
 ## Instalar en el ordenador (Linux)
 
 1. Descarga [`dist/pantalla-host-linux-x86_64`](dist/) (vale para casi cualquier distribución de 2020 en adelante).
-2. En una terminal:
+2. Ábrelo: doble clic (marca antes "Permitir ejecutar como programa" en sus propiedades) o en una terminal:
    ```sh
-   chmod +x pantalla-host-linux-x86_64 && ./pantalla-host-linux-x86_64 instalar
+   chmod +x pantalla-host-linux-x86_64 && ./pantalla-host-linux-x86_64
    ```
-   Pide **una vez** la contraseña de administrador (solo si hace falta) para la webcam virtual y el
-   cortafuegos. Lo demás es de tu usuario: servicio que arranca con la sesión, lanzador "Escritorio" y,
-   en KDE, el permiso para crear el monitor.
+   Se instala solo para tu usuario (servicio que arranca con la sesión, lanzador "Escritorio" y, en
+   KDE, el permiso para crear el monitor) y abre el panel. Solo si hace falta, pide **una vez** la
+   contraseña de administrador para la webcam virtual y el cortafuegos. No hay que instalar nada más:
+   el vídeo se comprime en el propio programa (vale con cualquier gráfica, también NVIDIA).
 
 Y ya está: abre la app en el móvil, elige el ordenador y acepta en el ordenador (panel o barra).
 

@@ -131,6 +131,18 @@ fn main() {
                 }
                 return;
             }
+            // Linux: abierto a mano (doble clic o terminal) desde fuera de ~/.local/bin → se instala
+            // solo (servicio, lanzador, webcam con una contraseña gráfica) y abre el panel
+            #[cfg(target_os = "linux")]
+            if std::env::var_os("INVOCATION_ID").is_none()
+                && std::env::current_exe().ok() != Some(install::home().join(".local/bin/pantalla-host"))
+            {
+                if let Err(e) = install::install(false) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             serve()
         }
         _ => {

@@ -7,6 +7,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -101,11 +102,84 @@ fn create_monitor(w: u32, h: u32) -> Result<(), String> {
     if let Some(p) = prev.filter(|p| !p.is_empty() && p != OUTPUT) {
         focus("monitor", &p);
     }
+    still_wallpaper();
     Ok(())
 }
 
 pub fn remove_monitor() {
     let _ = hyprctl(&["output", "remove", OUTPUT]);
+    normal_wallpaper();
+}
+
+// ───────────── Fondo quieto en el móvil ─────────────
+// Un fondo de vídeo (mpvpaper en todas las salidas, '*') obliga a comprimir y mandar imágenes sin
+// parar: más retardo y más batería. Mientras está el móvil: el vídeo en las demás salidas y una
+// imagen quieta en la del móvil. Se lanza con systemd-run (fuera del servicio) y sin --fork (bajo
+// systemd-run, al salir el padre se cerraría el fondo).
+
+fn mpv_saved() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("movil-mpvpaper.cmd")
+}
+
+fn bg_run(args: &[String]) {
+    let mut c = Command::new("systemd-run");
+    c.args(["--user", "-q", "--collect"]);
+    for k in ["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"] {
+        if let Ok(v) = std::env::var(k) {
+            c.arg(format!("--setenv={k}={v}"));
+        }
+    }
+    let _ = c.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).status();
+}
+
+fn mpvpaper_cmd() -> Option<Vec<String>> {
+    for e in std::fs::read_dir("/proc").ok()?.flatten() {
+        if std::fs::read_to_string(e.path().join("comm")).map(|c| c.trim() == "mpvpaper").unwrap_or(false) {
+            let raw = std::fs::read(e.path().join("cmdline")).ok()?;
+            return Some(raw.split(|b| *b == 0).filter(|a| !a.is_empty())
+                .map(|a| String::from_utf8_lossy(a).into_owned()).filter(|a| a != "--fork").collect());
+        }
+    }
+    None
+}
+
+fn still_wallpaper() {
+    let Some(args) = mpvpaper_cmd() else { return };
+    if args.len() < 3 || args[args.len() - 2] != "*" || mpv_saved().exists() {
+        return;
+    }
+    let _ = std::fs::write(mpv_saved(), args.join("\0"));
+    let home = std::env::var("HOME").unwrap_or_default();
+    let img = format!("{home}/.cache/movil-fondo.png");
+    if !std::path::Path::new(&img).exists() {
+        let _ = Command::new("ffmpeg").args(["-loglevel", "error", "-y", "-i", &args[args.len() - 1], "-frames:v", "1", &img])
+            .stdin(std::process::Stdio::null()).status();
+    }
+    let _ = Command::new("pkill").args(["-x", "mpvpaper"]).status();
+    std::thread::sleep(Duration::from_millis(300));
+    let mons = hyprctl(&["monitors"]).unwrap_or_default();
+    for m in mons.lines().filter_map(|l| l.strip_prefix("Monitor ")).filter_map(|l| l.split(' ').next()) {
+        if m == OUTPUT {
+            continue;
+        }
+        let mut a = args.clone();
+        let n = a.len();
+        a[n - 2] = m.to_string();
+        bg_run(&a);
+    }
+    if std::path::Path::new(&img).exists() {
+        bg_run(&[args[0].clone(), "-o".into(), "no-audio image-display-duration=inf panscan=1.0".into(), OUTPUT.into(), img]);
+    }
+}
+
+fn normal_wallpaper() {
+    let Ok(saved) = std::fs::read_to_string(mpv_saved()) else { return };
+    let _ = std::fs::remove_file(mpv_saved());
+    let args: Vec<String> = saved.split('\0').filter(|a| !a.is_empty()).map(String::from).collect();
+    let _ = Command::new("pkill").args(["-x", "mpvpaper"]).status();
+    std::thread::sleep(Duration::from_millis(300));
+    bg_run(&args);
 }
 
 // ───────────── Display ─────────────

@@ -432,9 +432,12 @@ impl eframe::App for Panel {
         let content_h = (inner.inner + 28.0).round();
         if (content_h - self.height).abs() > 1.0 {
             self.height = content_h;
-            // (solo el alto; el ancho lo puede cambiar quien lo use)
-            let w = ctx.content_rect().width().max(W);
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, content_h)));
+            // tamaño fijo (mínimo = máximo): así los gestores en mosaico (Hyprland, Sway…) la dejan
+            // flotando como un desplegable en vez de ocupar toda la pantalla
+            let sz = egui::vec2(W, content_h);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(sz));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(sz));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(sz));
         }
     }
 }
@@ -554,7 +557,8 @@ pub fn run() -> Result<(), String> {
             .with_title("Escritorio")
             .with_app_id("pantalla-host")
             .with_inner_size([W, 200.0])
-            .with_min_inner_size([W, 60.0])
+            .with_min_inner_size([W, 200.0])
+            .with_max_inner_size([W, 200.0])
             .with_resizable(true),
         ..Default::default()
     };

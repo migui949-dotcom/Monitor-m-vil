@@ -1,0 +1,8 @@
+/target
+/build
+# nunca subir claves de firma ni rutas locales
+*.keystore
+*.jks
+keystore.properties
+local.properties
+.env

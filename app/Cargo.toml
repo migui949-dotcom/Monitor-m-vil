@@ -1,0 +1,31 @@
+[package]
+name = "movil"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+android_logger = "0.15.1"
+base64 = "0.22"
+blake2 = "0.10"
+chacha20poly1305 = "0.10"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "android-native-activity", "default_fonts"] }
+egui_glow = "0.37"
+glow = "0.17.0"
+jni = "0.21"
+libc = "0.2.191"
+log = "0.4.35"
+ndk = { version = "0.9", features = ["media", "nativewindow", "audio", "api-level-29"] }
+ndk-sys = { version = "0.6", features = ["media", "nativewindow"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1.0.154"
+snow = "0.10.0"
+winit = { version = "0.30.13", default-features = false, features = ["android-native-activity", "rwh_06"] }
+x25519-dalek = "2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = "thin"

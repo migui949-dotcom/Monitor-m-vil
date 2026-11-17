@@ -27,6 +27,14 @@ pub fn ensure_env() {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         std::env::set_var("XDG_RUNTIME_DIR", &runtime);
     }
+    // la firma heredada puede ser de una sesión de Hyprland que ya no existe (reinicio de
+    // Hyprland con el servicio en marcha): entonces se busca la sesión viva
+    let stale = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .map(|sig| !std::path::Path::new(&format!("{runtime}/hypr/{sig}/.socket.sock")).exists())
+        .unwrap_or(false);
+    if stale {
+        std::env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
+    }
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
         // la instancia más reciente con socket vivo
         let mut best: Option<(std::time::SystemTime, String)> = None;
@@ -41,6 +49,12 @@ pub fn ensure_env() {
         if let Some((_, sig)) = best {
             std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", sig);
         }
+    }
+    let wl_dead = std::env::var("WAYLAND_DISPLAY")
+        .map(|d| !std::path::Path::new(&d).is_absolute() && !std::path::Path::new(&format!("{runtime}/{d}")).exists())
+        .unwrap_or(false);
+    if stale || wl_dead {
+        std::env::remove_var("WAYLAND_DISPLAY");
     }
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         for n in 0..10 {

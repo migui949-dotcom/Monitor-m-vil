@@ -61,7 +61,7 @@ impl Camera {
             let mut list: *mut sys::ACameraIdList = null_mut();
             ok(sys::ACameraManager_getCameraIdList(mgr, &mut list), "lista de cámaras")?;
             let want_front = facing == "user";
-            let mut chosen: Option<(std::ffi::CString, (i32, i32))> = None;
+            let mut chosen: Option<(std::ffi::CString, (i32, i32), i32)> = None;
             for i in 0..(*list).numCameras {
                 let id = *(*list).cameraIds.add(i as usize);
                 let mut meta: *mut sys::ACameraMetadata = null_mut();
@@ -80,13 +80,18 @@ impl Camera {
                         let fixed = ranges.iter().filter(|r| r.0 == r.1 && r.1 <= 30).max_by_key(|r| r.1);
                         best = *fixed.or(ranges.iter().filter(|r| r.1 <= 30).max_by_key(|r| (r.1, r.0))).unwrap_or(&best);
                     }
-                    chosen = Some((CStr::from_ptr(id).to_owned(), best));
+                    // cómo está montado el sensor (grados horarios respecto al móvil en vertical)
+                    let mut so: sys::ACameraMetadata_const_entry = std::mem::zeroed();
+                    let sensor = if sys::ACameraMetadata_getConstEntry(meta, sys::acamera_metadata_tag::ACAMERA_SENSOR_ORIENTATION.0, &mut so).0 == 0 {
+                        *so.data.i32_
+                    } else { 90 };
+                    chosen = Some((CStr::from_ptr(id).to_owned(), best, sensor));
                 }
                 sys::ACameraMetadata_free(meta);
             }
             sys::ACameraManager_deleteCameraIdList(list);
-            let Some((cam_id, fps)) = chosen else { log::error!("cámara: no hay {facing}"); sys::ACameraManager_delete(mgr); return None; };
-            log::info!("cámara: usando {} a {}-{} fps", cam_id.to_string_lossy(), fps.0, fps.1);
+            let Some((cam_id, fps, sensor)) = chosen else { log::error!("cámara: no hay {facing}"); sys::ACameraManager_delete(mgr); return None; };
+            log::info!("cámara: usando {} a {}-{} fps, sensor a {sensor}°", cam_id.to_string_lossy(), fps.0, fps.1);
 
             // Codificador H.264 con superficie de entrada (la cámara escribe ahí)
             // Se prueba con las claves de poco retraso; si el codificador las rechaza, con las mínimas
@@ -141,6 +146,28 @@ impl Camera {
 
             // Hilo de salida: cada imagen comprimida → canal 4 (los SPS/PPS se anteponen a cada fotograma clave)
             let stop = Arc::new(AtomicBool::new(false));
+            // Giro que necesita la imagen para salir derecha en el ordenador (como la orientación JPEG
+            // de Android): se manda al empezar y cada vez que cambia la posición del móvil
+            {
+                let (link, stop) = (link.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut last = -1;
+                    while !stop.load(Ordering::Relaxed) && !link.is_closed() {
+                        #[cfg(target_os = "android")]
+                        let dev = crate::android::device_orientation();
+                        #[cfg(not(target_os = "android"))]
+                        let dev = -1;
+                        let dev = if dev < 0 { 90 } else { dev };        // sin dato: horizontal
+                        let rot = if want_front { (sensor - dev + 360) % 360 } else { (sensor + dev) % 360 };
+                        if rot != last {
+                            last = rot;
+                            log::info!("cámara: giro {rot}° (móvil a {dev}°)");
+                            let _ = link.send_json(serde_json::json!({"t": "cam_rot", "deg": rot}));
+                        }
+                        std::thread::sleep(Duration::from_millis(300));
+                    }
+                });
+            }
             {
                 let (codec, stop) = (codec.clone(), stop.clone());
                 std::thread::spawn(move || {

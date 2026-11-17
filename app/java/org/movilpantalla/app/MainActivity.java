@@ -17,6 +17,7 @@ import android.os.Environment;
 import android.os.StatFs;
 import java.util.Locale;
 import android.os.Bundle;
+import android.view.OrientationEventListener;
 import android.view.View;
 import android.view.WindowManager;
 
@@ -36,8 +37,31 @@ public class MainActivity extends NativeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         immersive();
+        // orientación física del móvil (acelerómetro), para girar la imagen de la cámara
+        orient = new OrientationEventListener(this) {
+            public void onOrientationChanged(int o) {
+                if (o == ORIENTATION_UNKNOWN) return;
+                int r = ((o + 45) / 90 * 90) % 360;
+                // un poco de histéresis: no cambiar cerca de la diagonal
+                int d = Math.abs(o - r); if (d > 180) d = 360 - d;
+                if (d < 35) deviceDeg = r;
+            }
+        };
+        if (orient.canDetectOrientation()) orient.enable();
         // si el cortafuegos estaba puesto (y Android ya dio permiso de VPN), se vuelve a poner
         if (prefs().getBoolean("cortafuegos", false) && VpnService.prepare(this) == null) startFirewallService();
+    }
+
+    private OrientationEventListener orient;
+    private volatile int deviceDeg = -1;
+
+    /** Giro del móvil respecto a su posición natural (vertical), en grados horarios: 0/90/180/270, -1 si no se sabe. */
+    public int deviceOrientation() { return deviceDeg; }
+
+    @Override
+    protected void onDestroy() {
+        if (orient != null) orient.disable();
+        super.onDestroy();
     }
 
     // ───────────── Cortafuegos propio (Cortafuegos.java) ─────────────

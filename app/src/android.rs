@@ -82,6 +82,15 @@ mod imp {
         }
     }
 
+    /// Giro físico del móvil (0/90/180/270, -1 si no se sabe)
+    pub fn device_orientation() -> i32 {
+        let mut v = -1;
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { v = env.call_method(act, "deviceOrientation", "()I", &[])?.i()?; Ok(()) });
+        }
+        v
+    }
+
     pub fn open_autostart() {
         if let Some(app) = APP.get() {
             run(app, |env, act| { env.call_method(act, "openAutostart", "()V", &[])?; Ok(()) });
@@ -128,5 +137,5 @@ mod imp {
 }
 
 #[cfg(target_os = "android")]
-pub use imp::{ask_battery, ask_media_permissions, battery_exempt, firewall_state, has_media_permissions, info, init, keep_screen_on,
+pub use imp::{ask_battery, ask_media_permissions, battery_exempt, device_orientation, firewall_state, has_media_permissions, info, init, keep_screen_on,
               open_autostart, set_brightness, set_dim, set_firewall};

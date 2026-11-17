@@ -492,6 +492,20 @@ fn send_media(slot: u8, ctl: &mpsc::UnboundedSender<(u8, Vec<u8>)>) {
 /// Enciende/apaga la cámara del móvil `slot` (su webcam en el ordenador); flip cambia delantera/trasera
 fn set_cam(slot: u8, on: Option<bool>, flip: bool) -> bool {
     let Some(ctl) = ctl_of(slot) else { return false };
+    // sin webcam al conectar (p. ej. aún sin preparar el sistema): se reintenta al encender la cámara
+    #[cfg(target_os = "linux")]
+    if on == Some(true) {
+        let (missing, device) = st().sessions.get(&slot).map(|x| (x.cam_unavailable.is_some(), x.device.clone())).unwrap_or_default();
+        if missing {
+            let r = crate::devices::open_slot(slot, &device).err();
+            with_sess(slot, |x| {
+                x.cam_unavailable = r.clone();
+                if r.is_none() {
+                    x.media_error.clear();
+                }
+            });
+        }
+    }
     {
         let mut s = st();
         let Some(x) = s.sessions.get_mut(&slot) else { return false };

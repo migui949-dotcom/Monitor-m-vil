@@ -7,7 +7,7 @@
 | Pantalla (RFB + H.264) | ✅ probado | ✅ compila: pantalla virtual si hay driver IddCx, si no duplica |
 | Ratón / teclado | ✅ probado | ✅ compila (SendInput) |
 | Sonido → móvil (canal 2) | ✅ probado | ✅ compila (WASAPI loopback) |
-| Micrófono del móvil (canal 3) | ⚠️ hecho, **sin probar** | ❌ (Windows no tiene micro virtual de serie) |
+| Micrófono del móvil (canal 3) | ✅ probado (barra → 6083/set?mic=on → app manda audio) | ❌ (Windows no tiene micro virtual de serie) |
 | Cámara del móvil (canal 4) | ❌ | ❌ |
 | Almacén ~/Móvil (canal 5) | ✅ probado, 25 MB/s | ❌ (necesitaría WinFsp) |
 | Datos del stand-by ("sb") | ❌ | ❌ |
@@ -15,12 +15,6 @@
 Binarios: `dist/` (Linux x86_64 y Windows x86_64, ver SHA256SUMS).
 Compilar: `cargo build --release` y `cargo build --release --target x86_64-pc-windows-gnu --bin pantalla-host`
 (necesita `g++-mingw-w64-x86-64`; `.cargo/config.toml` enlaza libstdc++ estática).
-
-## Siguiente: micrófono (Linux) — 1 prueba
-1. `systemctl --user stop movild; PANTALLA_DEBUG=1 ~/pantalla-host/target/release/pantalla-host`
-2. Conectar desde la app, pulsar el botón de micro de la barra (llama a `127.0.0.1:6083/set?mic=toggle`).
-3. Ver que llega `mic_state` en el registro y grabar: `parec -d movil_microfono --raw | head -c 480000 > /tmp/m.raw`.
-   Si la app espera otro mensaje para empezar a mandar audio, mirar `app/src` en el Nobara (qué hace con `{"t":"mic"}` / `{"t":"media"}`).
 
 ## Siguiente: cámara
 Protocolo actual (movild.py + media.py):

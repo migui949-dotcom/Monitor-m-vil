@@ -225,8 +225,9 @@ impl Mic {
             return None;
         }
         let path = format!("{}/movil-mic.fifo", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
-        let module = find_module(&format!("source_name={MIC}")).or_else(|| {
-            load_module(&[
+        // la fuente la crea devices al arrancar y se queda siempre (para que Meet/Discord la vean):
+        // si ya está no es "nuestra" y no se quita al apagar el micro
+        let module = if find_module(&format!("source_name={MIC}")).is_some() { None } else { load_module(&[
                 "module-pipe-source",
                 &format!("source_name={MIC}"),
                 &format!("file={path}"),
@@ -234,8 +235,7 @@ impl Mic {
                 "rate=48000",
                 "channels=1",
                 "source_properties=\"device.description=\\\"Micrófono del móvil\\\"\"",
-            ])
-        });
+            ]) };
         let fifo = {
             use std::os::unix::fs::OpenOptionsExt;
             std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&path).ok()
@@ -257,6 +257,38 @@ impl Drop for Mic {
             sh(&["pactl", "unload-module", &m.to_string()]);
         }
     }
+}
+
+/// La fuente "Micrófono del móvil" siempre presente (sin móvil da silencio)
+pub fn ensure_mic_source() {
+    if !available() || find_module(&format!("source_name={MIC}")).is_some() {
+        return;
+    }
+    let path = format!("{}/movil-mic.fifo", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
+    load_module(&[
+        "module-pipe-source",
+        &format!("source_name={MIC}"),
+        &format!("file={path}"),
+        "format=s16le",
+        "rate=48000",
+        "channels=1",
+        "source_properties=\"device.description=\\\"Micrófono del móvil\\\"\"",
+    ]);
+}
+
+/// ¿Alguna app graba del micrófono del móvil? (sin contar medidores de nivel)
+pub fn mic_in_use() -> bool {
+    if !available() {
+        return false;
+    }
+    let srcs: HashSet<u64> = json(&["pactl", "-f", "json", "list", "sources"]).iter()
+        .filter(|s| s["name"] == MIC).filter_map(|s| s["index"].as_u64()).collect();
+    !srcs.is_empty() && json(&["pactl", "-f", "json", "list", "source-outputs"]).iter().any(|o| {
+        let p = &o["properties"];
+        o["source"].as_u64().map(|s| srcs.contains(&s)).unwrap_or(false)
+            && p["stream.monitor"].as_str() != Some("true")
+            && !p["media.name"].as_str().unwrap_or("").to_lowercase().contains("peak")
+    })
 }
 
 /// Quita lo que pudiera quedar de una sesión anterior (cierre brusco).

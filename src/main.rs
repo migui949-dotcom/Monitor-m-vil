@@ -23,6 +23,8 @@ mod video;
 #[cfg(target_os = "linux")]
 mod audio;
 #[cfg(target_os = "linux")]
+mod devices;
+#[cfg(target_os = "linux")]
 mod kde;
 #[cfg(target_os = "linux")]
 mod linux;

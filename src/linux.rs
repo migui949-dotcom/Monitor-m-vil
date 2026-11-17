@@ -63,6 +63,9 @@ pub fn is_hyprland() -> bool {
 }
 
 fn create_monitor(w: u32, h: u32) -> Result<(), String> {
+    // monitor con el foco ANTES de crear el del móvil (al crearlo, Hyprland le da el foco)
+    let prev = hyprctl(&["activeworkspace"]).ok()
+        .and_then(|t| t.split(" on monitor ").nth(1).map(|r| r.split(':').next().unwrap_or("").trim().to_string()));
     if !hyprctl(&["monitors", "all"])?.lines().any(|l| l.starts_with(&format!("Monitor {OUTPUT} "))) {
         hyprctl(&["output", "create", "headless", OUTPUT])?;
         std::thread::sleep(Duration::from_millis(300));
@@ -84,12 +87,19 @@ fn create_monitor(w: u32, h: u32) -> Result<(), String> {
     // Escritorio propio (11 por defecto, PHONE_WS en host.conf): Hyprland le da el primer número
     // libre y entonces Super+3 (por ejemplo) llevaba al móvil y las ventanas acababan allí
     let ws = crate::util::conf("PHONE_WS").unwrap_or_else(|| "11".into());
-    let prev = hyprctl(&["activeworkspace"]).ok()
-        .and_then(|t| t.split(" on monitor ").nth(1).map(|r| r.split(':').next().unwrap_or("").trim().to_string()));
-    let _ = hyprctl(&["dispatch", "focusmonitor", OUTPUT]);
-    let _ = hyprctl(&["dispatch", "workspace", &ws]);
+    // con configuración en Lua, `hyprctl dispatch X` es hl.dispatch(X): otra sintaxis
+    let focus = |kind: &str, v: &str| {
+        if lua {
+            let v = if kind == "workspace" && v.parse::<i64>().is_ok() { v.to_string() } else { format!("\"{v}\"") };
+            let _ = hyprctl(&["dispatch", &format!("hl.dsp.focus({{ {kind} = {v} }})")]);
+        } else {
+            let _ = hyprctl(&["dispatch", if kind == "monitor" { "focusmonitor" } else { "workspace" }, v]);
+        }
+    };
+    focus("monitor", OUTPUT);
+    focus("workspace", &ws);
     if let Some(p) = prev.filter(|p| !p.is_empty() && p != OUTPUT) {
-        let _ = hyprctl(&["dispatch", "focusmonitor", &p]);
+        focus("monitor", &p);
     }
     Ok(())
 }

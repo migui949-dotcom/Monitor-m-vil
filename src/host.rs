@@ -39,10 +39,20 @@ struct St {
     /// estado de cámara/micro (lo mismo que daba media.py en /state)
     mic_on: bool,
     mic_ok: bool,
+    cam_on: bool,
     cam_ok: bool,
+    /// "user" (delantera) o "environment" (trasera)
+    facing: String,
     media_error: String,
     #[cfg(target_os = "linux")]
     mic: Option<crate::audio::Mic>,
+}
+
+/// Marca de la sesión actual (None sin móvil): para olvidar lo encendido en la anterior
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn session_since() -> Option<u64> {
+    let s = st();
+    s.peer.as_ref().and(s.since).map(|t| t.to_bits())
 }
 
 fn st() -> std::sync::MutexGuard<'static, St> {
@@ -299,8 +309,12 @@ async fn answer_http(stream: TcpStream) {
 
 fn media_state() -> Value {
     let s = st();
-    json!({"cam": false, "mic": s.mic_on, "facing": "user", "codec": "h264", "error": s.media_error,
-           "camOk": s.cam_ok, "micOk": s.mic_ok, "fps": 0, "using": "", "host": "pantalla-host"})
+    #[cfg(target_os = "linux")]
+    let fps = crate::devices::fps();
+    #[cfg(not(target_os = "linux"))]
+    let fps = 0.0;
+    json!({"cam": s.cam_on, "mic": s.mic_on, "facing": facing(&s), "codec": "h264", "error": s.media_error,
+           "camOk": s.cam_ok, "micOk": s.mic_ok, "fps": fps, "using": if s.cam_on { "h264" } else { "" }, "host": "pantalla-host"})
 }
 
 /// Enciende/apaga el micrófono del móvil como fuente de este equipo.
@@ -329,7 +343,47 @@ async fn set_mic(on: bool) -> bool {
         }
     }
     let _ = ctl.send((0, json!({"t": "mic", "on": on}).to_string().into_bytes()));
-    let _ = ctl.send((0, json!({"t": "media", "cam": false, "mic": on, "facing": "user"}).to_string().into_bytes()));
+    send_media(&ctl);
+    true
+}
+
+fn facing(s: &St) -> String {
+    if s.facing.is_empty() { "user".into() } else { s.facing.clone() }
+}
+
+/// Estado de cámara/micro a la app (ella enciende o apaga lo suyo)
+fn send_media(ctl: &mpsc::UnboundedSender<(u8, Vec<u8>)>) {
+    let s = st();
+    let m = json!({"t": "media", "cam": s.cam_on, "mic": s.mic_on, "facing": facing(&s)});
+    drop(s);
+    let _ = ctl.send((0, m.to_string().into_bytes()));
+}
+
+/// Enciende/apaga la cámara del móvil (webcam "Cámara del móvil"); flip cambia delantera/trasera
+fn set_cam(on: Option<bool>, flip: bool) -> bool {
+    let ctl = st().ctl.clone();
+    let Some(ctl) = ctl else { return false };
+    {
+        let mut s = st();
+        if flip {
+            s.facing = if facing(&s) == "user" { "environment".into() } else { "user".into() };
+        }
+        if let Some(on) = on {
+            s.cam_on = on;
+            if !on {
+                s.cam_ok = false;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if !s.cam_on {
+            crate::devices::cam_off();
+        }
+        #[cfg(not(target_os = "linux"))]
+        if s.cam_on {
+            s.media_error = "La cámara del móvil aún no funciona en Windows".into();
+        }
+    }
+    send_media(&ctl);
     true
 }
 
@@ -349,8 +403,11 @@ async fn media_http(stream: TcpStream) {
                 let on = if *v == "toggle" { !st().mic_on } else { matches!(*v, "1" | "on" | "true") };
                 set_mic(on).await;
             }
-            if matches!(q.get("cam"), Some(v) if *v != "0" && *v != "off" && *v != "false") {
-                st().media_error = "La cámara aún no está en pantalla-host".into();
+            let cam = q.get("cam").map(|v| if *v == "toggle" { !st().cam_on } else { matches!(*v, "1" | "on" | "true") });
+            let flip = q.get("facing").copied() == Some("flip")
+                || q.get("facing").map(|f| *f != facing(&st()) && matches!(*f, "user" | "environment")).unwrap_or(false);
+            if cam.is_some() || flip {
+                set_cam(cam, flip);
             }
             Some(media_state())
         }
@@ -636,10 +693,14 @@ async fn session(
                         if let Some(on) = m["mic"].as_bool() {
                             tokio::spawn(set_mic(on));
                         }
-                        if m["cam"].as_bool() == Some(true) || m["facing"].is_string() {
-                            let _ = out_tx.send((0, json!({"t": "aviso", "text": "La cámara aún no funciona con este ordenador (pantalla-host)"})
-                                .to_string().into_bytes()));
+                        let flip = m["facing"].is_string();
+                        if m["cam"].is_boolean() || flip {
+                            set_cam(m["cam"].as_bool(), flip);
                         }
+                    }
+                    "cam_rot" => {
+                        #[cfg(target_os = "linux")]
+                        crate::devices::set_rot(m["deg"].as_i64().unwrap_or(0) as i32);
                     }
                     "standby_set" => {
                         let on = m["on"].as_bool().unwrap_or(false);
@@ -671,6 +732,13 @@ async fn session(
                 #[cfg(target_os = "linux")]
                 if let Some(mic) = st().mic.as_mut() {
                     mic.write(body);
+                }
+            }
+            4 => {
+                // cámara del móvil (H.264): solo si está pedida
+                #[cfg(target_os = "linux")]
+                if st().cam_on {
+                    crate::devices::feed(body);
                 }
             }
             1 => {
@@ -706,7 +774,10 @@ async fn session(
         let mut s = st();
         s.mic_on = false;
         s.mic_ok = false;
+        s.cam_on = false;
+        s.cam_ok = false;
         s.media_error.clear();
+        crate::devices::cam_off();
     }
     drop(out_tx);
     st().ctl = None;
@@ -773,6 +844,7 @@ fn cleanup() {
             crate::linux::remove_monitor();
         }
         crate::audio::cleanup();
+        crate::devices::start();
         crate::storage::unmount();
     }
 }

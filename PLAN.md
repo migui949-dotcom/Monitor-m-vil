@@ -38,7 +38,14 @@ pantalla-host hay que hacer lo mismo.
 ## Lanzador
 `pantalla-host menu` (fuzzel/rofi/wofi/tofi/bemenu/dmenu, MENU= en host.conf) y `instalar --solo-menu`.
 
-## Siguiente: cámara
+## 0.2.0 (2026-11-17)
+- Cámara en pantalla-host (`src/devices.rs`): OpenH264 → giro (cam_rot) → 1280x720 → /dev/video42 escrito
+  directamente (VIDIOC_S_FMT, sin ffmpeg), imagen de espera 2 fps, encendido/apagado automático al abrir la
+  webcam o grabar del micro (fuente "Micrófono del móvil" siempre presente). Probado con el móvil: 30 fps,
+  todo el servicio ~17 % CPU.
+- Binario Linux con glibc ≥ 2.31 (cargo-zigbuild). `preparar-sistema` (pkexec) desde `instalar`.
+
+## Siguiente: cámara (antiguo plan, ya hecho en Linux)
 Protocolo actual (movild.py + media.py):
 - Encender/apagar: control `{"t":"media","cam":bool,"mic":bool,"facing":"user"|"environment"}` hacia la app;
   la app responde `{"t":"cam_state","camOk":bool,"error"?}`.

@@ -33,8 +33,9 @@ Y ya está: abre la app en el móvil, elige el ordenador y acepta en el ordenado
 
 - **Webcam y micrófono**: en Meet/Discord elige "Camara del movil" y "Micrófono del móvil". Se
   encienden solos cuando una app los usa y se apagan 10 s después.
-- **Menú rápido**: busca "Escritorio" en tu lanzador (fuzzel, rofi, wofi…): cámara, micro, brillo,
-  pantalla del móvil, stand-by, desconectar.
+- **Panel "Escritorio"** (búscalo en tu lanzador: fuzzel, rofi, wofi, menú de KDE…): aceptar móviles,
+  batería y temperatura, brillo, pantalla del móvil, stand-by, archivos, cámara (en el panel o en su
+  propia ventana), micro, posición del monitor (izquierda, arriba, abajo, derecha) y desconectar.
 - **Opciones** en `~/.config/movil-pantalla/host.conf`: `POSITION=auto-left|auto-right|…`,
   `PHONE_WS=11` (escritorio del móvil en Hyprland), `PANEL=no`, `MENU=…`.
 - Por cable USB hace falta `adb`.

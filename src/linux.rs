@@ -198,9 +198,21 @@ fn normal_wallpaper() {
     let Ok(saved) = std::fs::read_to_string(mpv_saved()) else { return };
     let _ = std::fs::remove_file(mpv_saved());
     let args: Vec<String> = saved.split('\0').filter(|a| !a.is_empty()).map(String::from).collect();
-    let _ = Command::new("pkill").args(["-x", "mpvpaper"]).status();
-    std::thread::sleep(Duration::from_millis(300));
+    // primero el fondo de siempre y luego se quitan los de ahora: si algo corta a medias, nunca
+    // se queda la pantalla sin fondo
+    let old = mpvpaper_pids();
     bg_run(&args);
+    std::thread::sleep(Duration::from_millis(500));
+    for pid in old {
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+}
+
+fn mpvpaper_pids() -> Vec<i32> {
+    std::fs::read_dir("/proc").into_iter().flatten().flatten()
+        .filter(|e| std::fs::read_to_string(e.path().join("comm")).map(|c| c.trim() == "mpvpaper").unwrap_or(false))
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .collect()
 }
 
 // ───────────── Display ─────────────

@@ -50,6 +50,7 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
          [Service]\n\
          ExecStart=%h/.local/bin/pantalla-host\n\
          Restart=on-failure\n\
+         KillMode=mixed\n\
          RestartSec=3\n\
          \n\
          [Install]\n\
@@ -91,9 +92,9 @@ fn write_launcher(dest: &std::path::Path) -> Result<(), String> {
         apps.join("pantalla-host.desktop"),
         format!(
             "[Desktop Entry]\nType=Application\nName=Escritorio\nGenericName=Móvil como pantalla\n\
-             Comment=Cámara, micro, brillo y conexión del móvil\nKeywords=movil;móvil;camara;cámara;microfono;brillo;desconectar;\n\
-             Exec={d} menu\nIcon=escritorio-movil\nCategories=Utility;\nActions=panel;\n\
-             X-KDE-Wayland-Interfaces={i}\n\n[Desktop Action panel]\nName=Abrir el panel\nExec={d} panel\n",
+             Comment=Panel del móvil: conexión, cámara, micro, brillo y posición\nKeywords=movil;móvil;camara;cámara;microfono;brillo;desconectar;\n\
+             Exec={d} panel\nIcon=escritorio-movil\nCategories=Utility;\n\
+             X-KDE-Wayland-Interfaces={i}\n",
             d = dest.display(),
             i = crate::kde::INTERFACES
         ),

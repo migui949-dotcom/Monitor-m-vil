@@ -37,11 +37,16 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
     // declaran en su .desktop (se busca por la ruta del ejecutable)
     let apps = home().join(".local/share/applications");
     std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+    // Un solo .desktop: el lanzador "Escritorio" (abre el panel) y, para KWin, el permiso (KWin lo
+    // busca por la ruta del ejecutable, la primera palabra de Exec)
+    let icons = home().join(".local/share/icons/hicolor/scalable/apps");
+    let _ = std::fs::create_dir_all(&icons);
+    let _ = std::fs::write(icons.join("escritorio-movil.svg"), include_str!("../app/icono.svg"));
     std::fs::write(
         apps.join("pantalla-host.desktop"),
         format!(
-            "[Desktop Entry]\nType=Application\nName=Escritorio (servicio del móvil)\nExec={}\nNoDisplay=true\n\
-             X-KDE-Wayland-Interfaces={}\n",
+            "[Desktop Entry]\nType=Application\nName=Escritorio\nComment=Usar el móvil como pantalla: cámara, micro y conexión\n\
+             Exec={} panel\nIcon=escritorio-movil\nCategories=Utility;\nX-KDE-Wayland-Interfaces={}\n",
             dest.display(),
             crate::kde::INTERFACES
         ),
@@ -74,6 +79,12 @@ pub fn install(replace_movild: bool) -> Result<(), String> {
         return Err("no se pudo activar el servicio de usuario".into());
     }
     println!("Instalado: {} (servicio de usuario pantalla-host, arranca con la sesión).", dest.display());
+    println!("Panel: \"Escritorio\" en el menú de aplicaciones (se abre solo cuando un móvil pide conectarse).");
+    // se abre el panel ahora, si hay sesión gráfica
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some() {
+        let _ = Command::new(&dest).arg("panel").stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    }
     Ok(())
 }
 
@@ -84,6 +95,7 @@ pub fn uninstall() -> Result<(), String> {
     run("systemctl", &["--user", "daemon-reload"]);
     let _ = std::fs::remove_file(home().join(".local/bin/pantalla-host"));
     let _ = std::fs::remove_file(home().join(".local/share/applications/pantalla-host.desktop"));
+    let _ = std::fs::remove_file(home().join(".local/share/icons/hicolor/scalable/apps/escritorio-movil.svg"));
     // si estaba la versión en Python, se vuelve a ella
     if home().join(".config/systemd/user/movild.service").exists() {
         run("systemctl", &["--user", "enable", "--now", "movild"]);

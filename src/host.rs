@@ -63,7 +63,7 @@ fn app_log(lines: &[Value]) {
     crate::seclog::append(&util::state_dir().join("app-movil.log"), &lines, false);
 }
 
-fn status_path() -> PathBuf {
+pub fn status_path() -> PathBuf {
     std::env::var_os("MOVILD_STATUS").map(PathBuf::from).unwrap_or_else(|| util::state_dir().join("movild.json"))
 }
 
@@ -201,8 +201,23 @@ async fn ask_user(device: &str, fp: &str, via: &str) -> bool {
     if std::env::var("MOVILD_TEST_ACCEPT").as_deref() == Ok("1") {
         return true;
     }
+    // sin la barra Quickshell: se abre el panel "Escritorio" para enseñar la tarjeta
+    #[cfg(target_os = "linux")]
+    if !quickshell_running() && !crate::panel::alive() && util::conf("PANEL").as_deref() != Some("no") {
+        crate::panel::spawn();
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if crate::panel::alive() {
+                break;
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let card = quickshell_running() || crate::panel::alive();
+    #[cfg(all(unix, not(target_os = "linux")))]
+    let card = quickshell_running();
     #[cfg(unix)]
-    if quickshell_running() {
+    if card {
         let (tx, rx) = oneshot::channel();
         let mut idb = [0u8; 6];
         getrandom::getrandom(&mut idb).unwrap();

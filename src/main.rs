@@ -27,6 +27,8 @@ mod kde;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+mod panel;
+#[cfg(target_os = "linux")]
 mod pw;
 #[cfg(target_os = "linux")]
 mod storage;
@@ -78,6 +80,13 @@ fn main() {
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        "panel" => {
+            if let Err(e) = panel::run() {
+                eprintln!("panel: {e}");
+                std::process::exit(1);
+            }
+        }
         "desinstalar" | "uninstall" => {
             if let Err(e) = install::uninstall() {
                 eprintln!("{e}");
@@ -97,7 +106,7 @@ fn main() {
             serve()
         }
         _ => {
-            eprintln!("uso: pantalla-host [instalar [--sustituir-movild] | desinstalar | info | --version]");
+            eprintln!("uso: pantalla-host [instalar [--sustituir-movild] | desinstalar | panel | info | --version]");
             std::process::exit(2);
         }
     }

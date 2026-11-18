@@ -80,7 +80,7 @@ Para compilarla tú: `app/build.sh` (Rust + NDK, sin Gradle).
 | Toque con tres dedos | menú de la app (desconectar, cámara, micro, teclado…) |
 
 El teclado sale solo cuando una app del monitor del móvil activa un campo de texto (text-input-v3:
-GTK, Qt, Firefox; Chromium/Brave con `--enable-wayland-ime --wayland-text-input-version=3`).
+GTK, Qt, Firefox, Brave/Chromium recientes; los Chromium antiguos necesitan `--enable-wayland-ime`).
 
 ## Compilar
 

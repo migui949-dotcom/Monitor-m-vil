@@ -20,6 +20,15 @@ import android.os.Bundle;
 import android.view.OrientationEventListener;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.KeyEvent;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
+import android.text.InputType;
+import android.os.Build;
 
 /**
  * Capa mínima en Java sobre la app en Rust (NativeActivity):
@@ -230,5 +239,119 @@ public class MainActivity extends NativeActivity {
                 setTurnScreenOn(on);
             }
         });
+    }
+
+    // ───────────── Teclado del móvil para escribir en el ordenador ─────────────
+    // Una vista invisible que hace de campo de texto: el teclado de Android le manda lo que se
+    // escribe (InputConnection) y Rust lo recoge con takeTyped() en cada fotograma.
+    // '\b' = borrar, '\n' = Intro, '\u007f' = Supr, '\t' = tabulador.
+
+    private final StringBuilder typed = new StringBuilder();
+    private View teclado;
+    private volatile boolean tecladoOn;
+
+    synchronized void typed(String s) { typed.append(s); }
+
+    /** Lo escrito desde la última llamada (vacío si nada). */
+    public synchronized String takeTyped() {
+        String s = typed.toString();
+        typed.setLength(0);
+        return s;
+    }
+
+    /** Alto del teclado en píxeles (Android 11+), -1 si no se sabe. */
+    public int imeHeight() {
+        if (Build.VERSION.SDK_INT < 30) return -1;
+        try {
+            WindowInsets in = getWindow().getDecorView().getRootWindowInsets();
+            return in == null ? -1 : in.getInsets(WindowInsets.Type.ime()).bottom;
+        } catch (Exception e) { return -1; }
+    }
+
+    public void showKeyboard(final boolean on) {
+        tecladoOn = on;
+        runOnUiThread(new Runnable() {
+            public void run() {
+                final InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (teclado == null) {
+                    teclado = new Teclado();
+                    addContentView(teclado, new ViewGroup.LayoutParams(1, 1));
+                }
+                if (on) {
+                    teclado.requestFocus();
+                    imm.restartInput(teclado);
+                    imm.showSoftInput(teclado, 0);
+                    // a veces la vista aún no está lista: se insiste un momento después
+                    teclado.postDelayed(new Runnable() { public void run() {
+                        if (tecladoOn) { teclado.requestFocus(); imm.showSoftInput(teclado, 0); }
+                    } }, 150);
+                } else {
+                    imm.hideSoftInputFromWindow(teclado.getWindowToken(), 0);
+                    teclado.clearFocus();
+                }
+                immersive();
+            }
+        });
+    }
+
+    private class Teclado extends View {
+        Teclado() {
+            super(MainActivity.this);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
+        }
+
+        @Override public boolean onCheckIsTextEditor() { return true; }
+
+        @Override
+        public InputConnection onCreateInputConnection(EditorInfo o) {
+            // sin sugerencias ni autocorrección (cada letra se manda al momento); sin pantalla completa
+            o.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            o.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN
+                    | EditorInfo.IME_ACTION_NONE;
+            return new BaseInputConnection(this, false) {
+                /** texto «a medias» del teclado (lo que va subrayado mientras se escribe) */
+                private String comp = "";
+
+                private void replace(String now) {
+                    int p = 0;
+                    while (p < comp.length() && p < now.length() && comp.charAt(p) == now.charAt(p)) p++;
+                    StringBuilder out = new StringBuilder();
+                    for (int i = comp.codePointCount(p, comp.length()); i > 0; i--) out.append('\b');
+                    out.append(now.substring(p));
+                    if (out.length() > 0) typed(out.toString());
+                }
+
+                @Override public boolean commitText(CharSequence t, int pos) {
+                    replace(t.toString()); comp = ""; return true;
+                }
+                @Override public boolean setComposingText(CharSequence t, int pos) {
+                    String n = t.toString(); replace(n); comp = n; return true;
+                }
+                @Override public boolean finishComposingText() { comp = ""; return true; }
+                @Override public boolean deleteSurroundingText(int before, int after) {
+                    StringBuilder b = new StringBuilder();
+                    for (int i = 0; i < before; i++) b.append('\b');
+                    for (int i = 0; i < after; i++) b.append('\u007f');
+                    typed(b.toString());
+                    return true;
+                }
+                @Override public boolean performEditorAction(int a) { typed("\n"); return true; }
+                @Override public boolean sendKeyEvent(KeyEvent e) {
+                    if (e.getAction() != KeyEvent.ACTION_DOWN) return true;
+                    switch (e.getKeyCode()) {
+                        case KeyEvent.KEYCODE_DEL: typed("\b"); break;
+                        case KeyEvent.KEYCODE_FORWARD_DEL: typed("\u007f"); break;
+                        case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_NUMPAD_ENTER: typed("\n"); break;
+                        case KeyEvent.KEYCODE_TAB: typed("\t"); break;
+                        default:
+                            int c = e.getUnicodeChar();
+                            if (c > 0) typed(new String(Character.toChars(c)));
+                    }
+                    return true;
+                }
+            };
+        }
     }
 }

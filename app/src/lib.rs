@@ -55,6 +55,15 @@ struct App {
     data_dir: std::path::PathBuf,
     /// pantalla de permisos (la primera vez, o desde el botón "Permisos")
     setup: bool,
+    /// teclado del móvil: puesto a mano desde el menú / sacado ahora / última petición del equipo atendida
+    kb_manual: bool,
+    kb_shown: bool,
+    kb_seen_n: u32,
+    /// dónde (y de la pantalla) se tocó por última vez, y dónde se tocó al salir el teclado
+    last_tap_y: f32,
+    kb_anchor_y: f32,
+    kb_h_px: i32,
+    kb_h_at: u32,
     /// estado de permisos/cortafuegos leído por JNI (se refresca cada segundo)
     perms: Perms,
 }
@@ -78,6 +87,8 @@ impl App {
             cam_on: false,
             mic_on: false,
             facing: "user".into(),
+            teclado: false,
+            teclado_n: 0,
             aviso: None,
         }));
         net::discovery(state.clone());
@@ -107,6 +118,7 @@ impl App {
             android: None,
             keep_on: false,
             data_dir, setup, perms: Perms::default(),
+            kb_manual: false, kb_shown: false, kb_seen_n: 0, last_tap_y: 0.0, kb_anchor_y: 0.0, kb_h_px: -1, kb_h_at: 0,
         }
     }
 
@@ -213,7 +225,34 @@ impl App {
         // encaja w×h en la pantalla manteniendo la proporción
         let scale = (full.width() / w as f32).min(full.height() / h as f32);
         let size = egui::vec2(w as f32 * scale, h as f32 * scale);
-        let rect = egui::Rect::from_center_size(full.center(), size);
+        let mut rect = egui::Rect::from_center_size(full.center(), size);
+        // teclado del móvil: lo pide el equipo (campo de texto) o se ha puesto a mano
+        let (kb_host, kb_n) = { let st = self.state.lock().unwrap(); (st.teclado, st.teclado_n) };
+        let kb_want = (kb_host || self.kb_manual) && !self.menu;
+        if kb_want != self.kb_shown || (kb_want && kb_n != self.kb_seen_n) {
+            if kb_want && !self.kb_shown { self.kb_anchor_y = self.last_tap_y; self.kb_h_px = -1; }
+            self.kb_shown = kb_want;
+            self.kb_seen_n = kb_n;
+            #[cfg(target_os = "android")]
+            android::show_keyboard(kb_want);
+        }
+        if self.kb_shown {
+            #[cfg(target_os = "android")]
+            {
+                let t = android::take_typed();
+                if !t.is_empty() { let _ = link.send_json(serde_json::json!({"t": "texto", "s": t})); }
+                // alto real del teclado (Android 11+), mirado de vez en cuando
+                self.kb_h_at = self.kb_h_at.wrapping_add(1);
+                if self.kb_h_at % 15 == 0 { self.kb_h_px = android::ime_height(); }
+            }
+            // si el teclado taparía donde se ha tocado, el escritorio sube hasta que se vea
+            let kb_h = if self.kb_h_px > 0 { self.kb_h_px as f32 / ui.ctx().pixels_per_point() } else { full.height() * 0.5 };
+            let visible_bottom = full.bottom() - kb_h;
+            if self.kb_anchor_y > visible_bottom - 30.0 {
+                let up = self.kb_anchor_y - (full.top() + (visible_bottom - full.top()) * 0.5);
+                rect = rect.translate(egui::vec2(0.0, -up.max(0.0)));
+            }
+        }
         let (renderer, v) = (self.renderer.clone(), video.clone());
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 { log::info!("escritorio: dibujando {w}x{h} en {rect:?}"); }
@@ -244,7 +283,19 @@ impl App {
                egui::Color32::from_white_alpha(170));
         let events = ui.input(|i| i.events.clone());
         for ev in events {
+            // si el teclado de Android acaba mandando teclas a la app (y no al campo invisible)
+            if self.kb_shown {
+                match &ev {
+                    egui::Event::Text(t) => { let _ = link.send_json(serde_json::json!({"t": "texto", "s": t})); }
+                    egui::Event::Key { key, pressed: true, .. } => {
+                        let s = match key { egui::Key::Backspace => "\u{8}", egui::Key::Enter => "\n", egui::Key::Tab => "\t", egui::Key::Delete => "\u{7f}", _ => "" };
+                        if !s.is_empty() { let _ = link.send_json(serde_json::json!({"t": "texto", "s": s})); }
+                    }
+                    _ => {}
+                }
+            }
             if let egui::Event::Touch { id, phase, pos, .. } = ev {
+                if phase == egui::TouchPhase::Start && !self.kb_shown { self.last_tap_y = pos.y; }
                 if phase == egui::TouchPhase::Start && btn.contains(pos) { self.btn_touch = Some(id.0); }
                 if self.btn_touch == Some(id.0) {
                     if matches!(phase, egui::TouchPhase::End | egui::TouchPhase::Cancel) {
@@ -259,7 +310,15 @@ impl App {
                         // soltar la ventana siempre (si no, Super se quedaría pulsada)
                         g @ Gesture::WinDrop(..) => send_gesture(&link, g),
                         // con el menú abierto los toques son para el menú, no para el escritorio
+                        // y el pellizco se acaba siempre
+                        g @ Gesture::PinchEnd(..) => send_gesture(&link, g),
                         _ if self.menu => {}
+                        g @ Gesture::Click(..) => {
+                            send_gesture(&link, g);
+                            // tocar con el teclado pedido lo vuelve a sacar (por si se había bajado)
+                            #[cfg(target_os = "android")]
+                            if self.kb_shown { android::show_keyboard(true); }
+                        }
                         g => send_gesture(&link, g),
                     }
                 }
@@ -340,6 +399,13 @@ impl App {
                             self.menu = false;
                         }
                         ui.add_space(16.0);
+                        let kb = if self.kb_manual { "\u{F030C}  Quitar el teclado" } else { "\u{F030C}  Sacar el teclado" };
+                        if ui.add(b(kb, theme::YELLOW)).clicked() {
+                            self.kb_manual = !self.kb_manual;
+                            if self.kb_manual { self.last_tap_y = 0.0; }
+                            self.menu = false;
+                        }
+                        ui.add_space(16.0);
                         self.media_controls(ui, link, 300.0);
                         ui.add_space(16.0);
                         if ui.add(b("Volver al escritorio", theme::BLUE)).clicked() {
@@ -372,6 +438,10 @@ enum Gesture {
     WinDrop(u16, u16),
     /// toque con dos dedos: la ventana bajo los dedos sale del mosaico (Super+V)
     Float(u16, u16),
+    /// pellizco: la ventana flotante bajo los dedos se agranda/encoge (escala respecto al principio)
+    PinchStart(u16, u16),
+    PinchMove(f32),
+    PinchEnd(f32),
     Menu,
 }
 
@@ -409,6 +479,9 @@ fn send_gesture(link: &link::Link, g: Gesture) {
             rfb::key(link, 'v' as u32, false);
             rfb::key(link, SUPER_L, false);
         }
+        Gesture::PinchStart(x, y) => { let _ = link.send_json(serde_json::json!({"t": "pinch", "fase": 0, "x": x, "y": y, "s": 1.0})); }
+        Gesture::PinchMove(e) => { let _ = link.send_json(serde_json::json!({"t": "pinch", "fase": 1, "s": e})); }
+        Gesture::PinchEnd(e) => { let _ = link.send_json(serde_json::json!({"t": "pinch", "fase": 2, "s": e})); }
         Gesture::Menu => {}
     }
 }
@@ -420,6 +493,9 @@ struct Two {
     r0: (u16, u16),
     grabbed: bool,
     last: (u16, u16),
+    /// distancia entre los dedos al empezar; pellizcando (y última escala mandada)
+    d0: f32,
+    pinch: Option<f32>,
 }
 
 /// Reconocedor de gestos: tocar = clic, arrastrar = clic mantenido, mantener = clic derecho,
@@ -464,7 +540,8 @@ impl Touch {
                         self.multi = true;
                         let c = self.centroid();
                         let r = to_remote(c);
-                        self.two = Some(Two { t0: std::time::Instant::now(), c0: c, r0: r, grabbed: false, last: r });
+                        let d0 = self.spread();
+                        self.two = Some(Two { t0: std::time::Instant::now(), c0: c, r0: r, grabbed: false, last: r, d0, pinch: None });
                         if self.dragging { self.dragging = false; return Some(Gesture::Release(self.last.0, self.last.1)); }
                     }
                     3 => {
@@ -475,6 +552,7 @@ impl Touch {
                         self.scroll_acc = egui::Vec2::ZERO;
                         // si se estaba moviendo una ventana con dos dedos, se suelta
                         if let Some(t) = self.two.take() {
+                            if let Some(e) = t.pinch { return Some(Gesture::PinchEnd(e)); }
                             if t.grabbed { return Some(Gesture::WinDrop(t.last.0, t.last.1)); }
                         }
                     }
@@ -488,9 +566,21 @@ impl Touch {
                 if n == 2 && self.max == 2 {
                     let c = self.centroid();
                     let r = to_remote(c);
+                    let d = self.spread();
                     let t = self.two.as_mut()?;
+                    if let Some(last) = t.pinch {
+                        let e = d / t.d0.max(1.0);
+                        if (e - last).abs() > 0.01 { t.pinch = Some(e); return Some(Gesture::PinchMove(e)); }
+                        return None;
+                    }
                     if !t.grabbed {
-                        if (c - t.c0).length() > 12.0 {
+                        // separar/juntar los dedos = pellizco; moverlos juntos = arrastrar la ventana
+                        let (dd, dc) = ((d - t.d0).abs(), (c - t.c0).length());
+                        if dd >= 30.0 && dd > dc * 1.5 {
+                            t.pinch = Some(1.0);
+                            return Some(Gesture::PinchStart(t.r0.0, t.r0.1));
+                        }
+                        if dc > 16.0 && dd < dc {
                             t.grabbed = true;
                             t.last = r;
                             return Some(Gesture::WinGrab(t.r0, r));
@@ -532,6 +622,10 @@ impl Touch {
                 // al levantar un dedo se suelta la ventana
                 if self.fingers.len() < 2 {
                     if let Some(t) = &self.two {
+                        if let Some(e) = t.pinch {
+                            self.two = None;
+                            return Some(Gesture::PinchEnd(e));
+                        }
                         if t.grabbed {
                             let l = t.last;
                             self.two = None;
@@ -569,6 +663,12 @@ impl Touch {
             return Some(Gesture::RightClick(r0.0, r0.1));
         }
         None
+    }
+
+    /// distancia entre los dos primeros dedos
+    fn spread(&self) -> f32 {
+        let mut it = self.fingers.values();
+        match (it.next(), it.next()) { (Some(a), Some(b)) => (*a - *b).length(), _ => 0.0 }
     }
 
     fn centroid(&self) -> egui::Pos2 {

@@ -40,6 +40,8 @@ mod pw;
 mod sistema;
 #[cfg(target_os = "linux")]
 mod storage;
+#[cfg(target_os = "linux")]
+mod teclado;
 #[cfg(windows)]
 mod winaudio;
 #[cfg(windows)]

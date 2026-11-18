@@ -91,6 +91,35 @@ mod imp {
         v
     }
 
+    /// Saca (true) o quita (false) el teclado del móvil
+    pub fn show_keyboard(on: bool) {
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { env.call_method(act, "showKeyboard", "(Z)V", &[JValue::Bool(on as u8)])?; Ok(()) });
+        }
+    }
+
+    /// Lo escrito en el teclado del móvil desde la última vez
+    pub fn take_typed() -> String {
+        let mut out = String::new();
+        if let Some(app) = APP.get() {
+            run(app, |env, act| {
+                let s = env.call_method(act, "takeTyped", "()Ljava/lang/String;", &[])?.l()?;
+                out = env.get_string(&jni::objects::JString::from(s))?.into();
+                Ok(())
+            });
+        }
+        out
+    }
+
+    /// Alto del teclado en píxeles (-1 si Android no lo dice)
+    pub fn ime_height() -> i32 {
+        let mut v = -1;
+        if let Some(app) = APP.get() {
+            run(app, |env, act| { v = env.call_method(act, "imeHeight", "()I", &[])?.i()?; Ok(()) });
+        }
+        v
+    }
+
     pub fn open_autostart() {
         if let Some(app) = APP.get() {
             run(app, |env, act| { env.call_method(act, "openAutostart", "()V", &[])?; Ok(()) });
@@ -138,4 +167,4 @@ mod imp {
 
 #[cfg(target_os = "android")]
 pub use imp::{ask_battery, ask_media_permissions, battery_exempt, device_orientation, firewall_state, has_media_permissions, info, init, keep_screen_on,
-              open_autostart, set_brightness, set_dim, set_firewall};
+              open_autostart, set_brightness, set_dim, set_firewall, show_keyboard, take_typed, ime_height};

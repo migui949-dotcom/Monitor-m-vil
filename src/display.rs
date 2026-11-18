@@ -33,6 +33,36 @@ pub trait Display: Send + Sync {
     fn pointer(&self, x: u16, y: u16, mask: u8);
     /// Tecla por keysym X11 (lo que manda RFB).
     fn key(&self, keysym: u32, down: bool);
+    /// Pellizco con dos dedos en el móvil: `fase` 0 empieza (en x, y), 1 sigue, 2 acaba;
+    /// `escala` = distancia actual entre los dedos / la del principio.
+    fn pinch(&self, _fase: u8, _x: u16, _y: u16, _escala: f32) {}
+    /// Texto del teclado del móvil ('\n' = Intro, '\u{8}' = borrar, '\u{7f}' = Supr).
+    fn text(&self, s: &str) {
+        type_keys(self, s);
+    }
+    /// Avisar (true/false) cuando una app del monitor del móvil quiere o deja de querer teclado.
+    fn on_keyboard(&self, _f: Box<dyn Fn(bool) + Send + Sync>) {}
+}
+
+/// keysym X11 de un carácter del teclado del móvil
+pub fn keysym_of(c: char) -> u32 {
+    match c {
+        '\n' | '\r' => 0xff0d,
+        '\u{8}' => 0xff08,
+        '\t' => 0xff09,
+        '\u{7f}' => 0xffff,
+        c if (c as u32) >= 0x20 && (c as u32) <= 0xff => c as u32,
+        c => 0x0100_0000 + c as u32,
+    }
+}
+
+/// Escribe `s` pulsando teclas (lo que se hace si no hay otra forma de mandar texto)
+pub fn type_keys<D: Display + ?Sized>(d: &D, s: &str) {
+    for c in s.chars() {
+        let k = keysym_of(c);
+        d.key(k, true);
+        d.key(k, false);
+    }
 }
 
 /// Hueco del último fotograma, compartido entre la captura y el codificador.

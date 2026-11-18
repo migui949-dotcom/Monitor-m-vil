@@ -838,6 +838,13 @@ async fn session(
     out_tx.send((0, accepted.to_string().into_bytes()))?;
 
     if let Some(d) = &display {
+        // una app del monitor del móvil quiere teclado (campo de texto): el móvil saca el suyo
+        {
+            let out = out_tx.clone();
+            d.on_keyboard(Box::new(move |on| {
+                let _ = out.send((0, json!({"t": "teclado", "on": on}).to_string().into_bytes()));
+            }));
+        }
         let (in_tx, in_rx) = std::sync::mpsc::channel();
         let (v_tx, mut v_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let stats = Arc::new(crate::rfb::Stats::default());
@@ -971,6 +978,18 @@ async fn session(
                         #[cfg(target_os = "linux")]
                         if m["cam"].as_bool() == Some(true) && !crate::panel::alive() {
                             crate::panel::spawn();
+                        }
+                    }
+                    // gestos y teclado del móvil
+                    "pinch" => {
+                        if let Some(d) = &display {
+                            let n = |k: &str| m[k].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16;
+                            d.pinch(m["fase"].as_u64().unwrap_or(2) as u8, n("x"), n("y"), m["s"].as_f64().unwrap_or(1.0) as f32);
+                        }
+                    }
+                    "texto" => {
+                        if let (Some(d), Some(t)) = (&display, m["s"].as_str()) {
+                            d.text(t);
                         }
                     }
                     "cam_rot" => {

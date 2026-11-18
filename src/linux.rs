@@ -382,6 +382,7 @@ fn normal_wallpaper() {
 enum Input {
     Pointer(u16, u16, u8),
     Key(u32, bool),
+    Pinch(u8, u16, u16, f32),
 }
 
 struct Hypr {
@@ -406,10 +407,39 @@ impl Display for Hypr {
     fn key(&self, keysym: u32, down: bool) {
         let _ = self.input.lock().unwrap().send(Input::Key(keysym, down));
     }
+    fn pinch(&self, fase: u8, x: u16, y: u16, escala: f32) {
+        let _ = self.input.lock().unwrap().send(Input::Pinch(fase, x, y, escala));
+    }
+    fn text(&self, s: &str) {
+        // con un campo de texto activo, los caracteres van como texto (vale cualquiera);
+        // Intro, borrar, tabulador… siempre como teclas
+        let mut run = String::new();
+        let flush = |run: &mut String| {
+            if !run.is_empty() && !crate::teclado::commit(run) {
+                crate::display::type_keys(self, run);
+            }
+            run.clear();
+        };
+        for c in s.chars() {
+            if c.is_control() {
+                flush(&mut run);
+                let k = crate::display::keysym_of(c);
+                self.key(k, true);
+                self.key(k, false);
+            } else {
+                run.push(c);
+            }
+        }
+        flush(&mut run);
+    }
+    fn on_keyboard(&self, f: Box<dyn Fn(bool) + Send + Sync>) {
+        crate::teclado::register(self.slot_nr, f);
+    }
 }
 
 impl Drop for Hypr {
     fn drop(&mut self) {
+        crate::teclado::unregister(self.slot_nr);
         self.stop.store(true, Ordering::Relaxed);
         remove_monitor(self.slot_nr);
     }
@@ -853,6 +883,75 @@ impl Keys {
     }
 }
 
+/// Ventana flotante que se está agrandando/encogiendo con dos dedos (coordenadas globales)
+struct Pinch {
+    addr: String,
+    cx: f64,
+    cy: f64,
+    w0: f64,
+    h0: f64,
+    /// monitor del móvil: x, y, ancho, alto
+    mon: (f64, f64, f64, f64),
+    lua: bool,
+}
+
+impl Pinch {
+    /// La ventana flotante del monitor `out` que hay bajo (x, y); las de mosaico no se tocan
+    fn start(out: &str, x: u16, y: u16) -> Option<Pinch> {
+        let json = |a: &[&str]| hyprctl(a).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let mons = json(&["monitors", "-j"])?;
+        let m = mons.as_array()?.iter().find(|m| m["name"] == out)?;
+        let (id, ws) = (m["id"].as_i64()?, m["activeWorkspace"]["id"].as_i64()?);
+        let sc = m["scale"].as_f64().unwrap_or(1.0).max(0.1);
+        let (mx, my) = (m["x"].as_f64()?, m["y"].as_f64()?);
+        let (mw, mh) = (m["width"].as_f64()? / sc, m["height"].as_f64()? / sc);
+        let (gx, gy) = (mx + x as f64 / sc, my + y as f64 / sc);
+        let clients = json(&["clients", "-j"])?;
+        let c = clients.as_array()?.iter()
+            .filter(|c| c["monitor"].as_i64() == Some(id) && c["workspace"]["id"].as_i64() == Some(ws))
+            .filter(|c| c["mapped"].as_bool() != Some(false) && c["hidden"].as_bool() != Some(true))
+            .filter(|c| {
+                let (at, sz) = (&c["at"], &c["size"]);
+                let (ax, ay, w, h) = (at[0].as_f64().unwrap_or(0.0), at[1].as_f64().unwrap_or(0.0), sz[0].as_f64().unwrap_or(0.0), sz[1].as_f64().unwrap_or(0.0));
+                gx >= ax && gx < ax + w && gy >= ay && gy < ay + h
+            })
+            // la de más arriba = la usada más recientemente
+            .min_by_key(|c| c["focusHistoryID"].as_i64().unwrap_or(i64::MAX))?;
+        if c["floating"].as_bool() != Some(true) {
+            return None;
+        }
+        let (ax, ay) = (c["at"][0].as_f64()?, c["at"][1].as_f64()?);
+        let (w0, h0) = (c["size"][0].as_f64()?, c["size"][1].as_f64()?);
+        Some(Pinch {
+            addr: c["address"].as_str()?.to_string(),
+            cx: ax + w0 / 2.0,
+            cy: ay + h0 / 2.0,
+            w0,
+            h0,
+            mon: (mx, my, mw, mh),
+            lua: lua_config(),
+        })
+    }
+
+    /// Tamaño = el inicial × `escala`, con el mismo centro, sin salirse del monitor
+    fn apply(&self, escala: f32) {
+        let (mx, my, mw, mh) = self.mon;
+        let e = escala.clamp(0.1, 10.0) as f64;
+        let w = (self.w0 * e).clamp(200.0_f64.min(self.w0), mw).round();
+        let h = (self.h0 * e).clamp(150.0_f64.min(self.h0), mh).round();
+        let x = (self.cx - w / 2.0).clamp(mx, mx + mw - w).round();
+        let y = (self.cy - h / 2.0).clamp(my, my + mh - h).round();
+        let a = &self.addr;
+        let cmd = if self.lua {
+            format!("dispatch hl.dsp.window.resize({{ x = {w}, y = {h}, window = \"address:{a}\" }}) ; \
+                     dispatch hl.dsp.window.move({{ x = {x}, y = {y}, window = \"address:{a}\" }})")
+        } else {
+            format!("dispatch resizewindowpixel exact {w} {h},address:{a} ; dispatch movewindowpixel exact {x} {y},address:{a}")
+        };
+        let _ = hyprctl(&["--batch", &cmd]);
+    }
+}
+
 fn input_loop(name: &str, rx: Receiver<Input>, w: u32, h: u32, stop: &AtomicBool) -> Result<(), Err> {
     let (conn, mut q, globals, mut s, output) = connect_with_output(name, Inp::default, |s| &mut s.outputs)?;
     let qh = q.handle();
@@ -870,8 +969,13 @@ fn input_loop(name: &str, rx: Receiver<Input>, w: u32, h: u32, stop: &AtomicBool
     let t0 = Instant::now();
     let ms = || t0.elapsed().as_millis() as u32;
     let mut prev = 0u8;
+    // pellizco en curso: ventana cogida + escala pendiente de aplicar (se aplican ~25 por segundo)
+    let mut pinch: Option<Pinch> = None;
+    let mut pinch_scale: Option<f32> = None;
+    let mut pinch_last = Instant::now();
     loop {
-        match rx.recv_timeout(Duration::from_millis(500)) {
+        let wait = if pinch_scale.is_some() { 20 } else { 500 };
+        match rx.recv_timeout(Duration::from_millis(wait)) {
             Ok(Input::Pointer(x, y, mask)) => {
                 let t = ms();
                 ptr.motion_absolute(t, (x as u32).min(w - 1), (y as u32).min(h - 1), w, h);
@@ -896,8 +1000,28 @@ fn input_loop(name: &str, rx: Receiver<Input>, w: u32, h: u32, stop: &AtomicBool
                 prev = mask;
             }
             Ok(Input::Key(sym, down)) => keys.key(ms(), sym, down)?,
+            Ok(Input::Pinch(fase, x, y, escala)) => match fase {
+                0 => {
+                    pinch = Pinch::start(name, x, y);
+                    pinch_scale = None;
+                }
+                1 => pinch_scale = Some(escala),
+                _ => {
+                    if let Some(p) = pinch.take() {
+                        p.apply(pinch_scale.take().unwrap_or(escala));
+                    }
+                    pinch_scale = None;
+                }
+            },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if let (Some(p), Some(e)) = (&pinch, pinch_scale) {
+            if pinch_last.elapsed() >= Duration::from_millis(40) {
+                p.apply(e);
+                pinch_scale = None;
+                pinch_last = Instant::now();
+            }
         }
         if stop.load(Ordering::Relaxed) {
             break;

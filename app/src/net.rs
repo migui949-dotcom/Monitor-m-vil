@@ -64,6 +64,9 @@ pub struct Shared {
     pub facing: String,
     /// aviso corto para enseñar en pantalla (texto, cuándo)
     pub aviso: Option<(String, std::time::Instant)>,
+    /// el ordenador pide teclado (campo de texto activo en el monitor del móvil) y cuántas veces lo ha pedido
+    pub teclado: bool,
+    pub teclado_n: u32,
 }
 
 pub type State = Arc<Mutex<Shared>>;
@@ -381,6 +384,11 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
                     state.lock().unwrap().mic_on = on;
                     set_mic(&mic, &link, on);
                 }
+                if v["t"] == "teclado" {
+                    let mut st = state.lock().unwrap();
+                    st.teclado = v["on"].as_bool().unwrap_or(false);
+                    if st.teclado { st.teclado_n += 1; }
+                }
                 if v["t"] == "aviso" {
                     state.lock().unwrap().aviso = Some((v["text"].as_str().unwrap_or("").to_string(), std::time::Instant::now()));
                 }
@@ -428,6 +436,7 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
         st.standby = false;
         st.cam_on = false;
         st.mic_on = false;
+        st.teclado = false;
         if st.dark {
             st.dark = false;
             #[cfg(target_os = "android")]

@@ -488,6 +488,11 @@ impl eframe::App for Panel {
                 if pill(ui, "\u{F04B2}", "Stand-by", x.info["standby"].as_bool().unwrap_or(false), theme::LAVENDER) {
                     send(ap, q("/standby?on=toggle"));
                 }
+                // teclado del móvil al pulsar un campo de texto (con el ratón también saldría): sí / no
+                let kb = st["teclado"].as_bool().unwrap_or(true);
+                if pill(ui, "\u{F030C}", if kb { "Teclado: sale solo" } else { "Teclado: no sale" }, kb, theme::BLUE) {
+                    send(ap, "/teclado?on=toggle".into());
+                }
                 if pill(ui, "\u{F024B}", "Archivos", false, theme::YELLOW) {
                     detach(std::process::Command::new("xdg-open").arg(x.storage()).spawn());
                 }

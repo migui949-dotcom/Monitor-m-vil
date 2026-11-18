@@ -149,6 +149,11 @@ fn session_json(slot: u8, s: &Sess) -> Value {
            })})
 }
 
+/// El teclado del móvil sale solo cuando el ordenador pide texto (host.conf TECLADO, sí por defecto)
+pub fn teclado_auto() -> bool {
+    util::conf("TECLADO").as_deref() != Some("0")
+}
+
 fn write_status() {
     let s = st();
     let first = s.sessions.values().next();
@@ -159,7 +164,7 @@ fn write_status() {
         "pending": pendings.first(), "standby": first.map(|f| f.standby).unwrap_or(false),
         "phone": first.and_then(|f| f.phone.clone()),
         // todos
-        "pendings": pendings, "max": max_phones(),
+        "pendings": pendings, "max": max_phones(), "teclado": teclado_auto(),
         "sessions": s.sessions.iter().map(|(k, v)| session_json(*k, v)).collect::<Vec<_>>(),
     });
     drop(s);
@@ -382,6 +387,22 @@ async fn answer_http(stream: TcpStream) {
             } else {
                 false
             }
+        }
+        // ¿sale solo el teclado del móvil al tocar un campo de texto? (vale para todos los móviles)
+        "/teclado" => {
+            let on = match q.get("on").copied().unwrap_or("toggle") {
+                "toggle" => !teclado_auto(),
+                v => matches!(v, "1" | "on" | "true"),
+            };
+            let _ = util::set_conf("TECLADO", if on { "1" } else { "0" });
+            if !on {
+                let slots: Vec<u8> = st().sessions.keys().copied().collect();
+                for c in slots.into_iter().filter_map(ctl_of) {
+                    let _ = c.send((0, json!({"t": "teclado", "on": false}).to_string().into_bytes()));
+                }
+            }
+            write_status();
+            true
         }
         "/brightness" => send(json!({"t": "brightness", "v": q.get("v").and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0)})),
         "/standby" => {
@@ -850,6 +871,10 @@ async fn session(
         {
             let out = out_tx.clone();
             d.on_keyboard(Box::new(move |on| {
+                // botón «Teclado» del panel apagado (TECLADO=0): el del móvil no sale solo
+                if on && !teclado_auto() {
+                    return;
+                }
                 let _ = out.send((0, json!({"t": "teclado", "on": on}).to_string().into_bytes()));
             }));
         }

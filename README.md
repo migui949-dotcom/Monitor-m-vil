@@ -81,6 +81,8 @@ Para compilarla tú: `app/build.sh` (Rust + NDK, sin Gradle).
 
 El teclado sale solo cuando una app del monitor del móvil activa un campo de texto (text-input-v3:
 GTK, Qt, Firefox, Brave/Chromium recientes; los Chromium antiguos necesitan `--enable-wayland-ime`).
+Como también sale al pulsar con el ratón, el panel tiene un botón «Teclado: sale solo / no sale»
+(`TECLADO=0` en host.conf, o `curl "127.0.0.1:47802/teclado?on=toggle"`).
 
 ## Compilar
 

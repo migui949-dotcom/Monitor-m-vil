@@ -266,9 +266,12 @@ fn route_once(moved: &mut HashSet<u64>) {
         let cur = sink_by_idx.get(&sink).cloned().unwrap_or_default();
         let pid = si["properties"]["application.process.id"].as_str().and_then(|p| p.parse().ok()).or_else(|| si["client"].as_u64().and_then(|c| cpid.get(&c).copied())).unwrap_or(0);
         let anc = if pid > 0 { ancestors(pid) } else { vec![] };
-        // el antepasado más cercano con ventana decide
-        let target = anc.iter().find_map(|p| on_phone.get(p).cloned());
-        let pc = target.is_none() && anc.iter().any(|p| on_pc.contains(p));
+        // el antepasado más cercano con ventana decide; si ese programa tiene ventanas en el PC
+        // y en el móvil a la vez (un navegador con una ventana en cada sitio), no se sabe de cuál es
+        // el sonido → se queda en el PC (antes se iba entero al móvil)
+        let owner = anc.iter().find(|p| on_phone.contains_key(p) || on_pc.contains(p));
+        let target = owner.filter(|p| !on_pc.contains(p)).and_then(|p| on_phone.get(p).cloned());
+        let pc = owner.map(|p| on_pc.contains(p)).unwrap_or(false);
         match target {
             Some(t) if t != cur => {
                 sh(&["pactl", "move-sink-input", &idx.to_string(), &t]);

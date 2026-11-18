@@ -137,6 +137,27 @@ fn create_monitor(slot: u8, w: u32, h: u32) -> Result<(), String> {
             let _ = hyprctl(&["dispatch", if kind == "monitor" { "focusmonitor" } else { "workspace" }, v]);
         }
     };
+    // Reglas de escritorio: los 1-10 se crean SIEMPRE en el monitor del ordenador y el propio en el
+    // del móvil. Sin ellas, con el ratón sobre el móvil (follow_mouse), Super+3 creaba el 3 allí.
+    let main_mon = prev.clone().filter(|p| !p.is_empty() && !crate::util::is_phone_output(p)).or_else(|| {
+        hyprctl(&["monitors"]).ok()?.lines().filter_map(|l| l.strip_prefix("Monitor "))
+            .filter_map(|l| l.split(' ').next()).find(|m| !crate::util::is_phone_output(m)).map(String::from)
+    });
+    let ws_rule = |w: &str, mon: &str, default: bool| {
+        if lua {
+            let d = if default { ", default = true" } else { "" };
+            let _ = hyprctl(&["eval", &format!("hl.workspace_rule({{ workspace = \"{w}\", monitor = \"{mon}\"{d} }})")]);
+        } else {
+            let d = if default { ",default:true" } else { "" };
+            let _ = hyprctl(&["keyword", "workspace", &format!("{w},monitor:{mon}{d}")]);
+        }
+    };
+    if let Some(m) = &main_mon {
+        for n in 1..=10 {
+            ws_rule(&n.to_string(), m, false);
+        }
+    }
+    ws_rule(&ws, &out, true);
     focus("monitor", &out);
     focus("workspace", &ws);
     if let Some(p) = prev.filter(|p| !p.is_empty() && !crate::util::is_phone_output(p)) {

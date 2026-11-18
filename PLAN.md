@@ -16,6 +16,25 @@ Binarios: `dist/` (Linux x86_64 y Windows x86_64, ver SHA256SUMS).
 Compilar: `cargo build --release` y `cargo build --release --target x86_64-pc-windows-gnu --bin pantalla-host`
 (necesita `g++-mingw-w64-x86-64`; `.cargo/config.toml` enlaza libstdc++ estática).
 
+## Windows — probado 2026-11-18 (v0.6.0)
+Máquina de pruebas: Windows 11 25H2 Enterprise de evaluación en QEMU/KVM en el Nobara (`~/vm-windows`:
+`arrancar.sh`, instalación desatendida con `autounattend.xml` + `preparar.ps1`, SSH en 127.0.0.1:2222,
+47801 → 127.0.0.1:47811, `qmp.py captura|clic|tecla`). Probado con el MI 9 (por cable + túnel) y con
+`prueba` + `PRUEBA_GUION` (guion de gestos/texto, capturas de lo que recibe el móvil):
+- ✅ doble clic → se instala en `%LOCALAPPDATA%\Pantalla`, inicio de sesión (Run), arranca, aviso «Instalado».
+- ✅ permiso (MessageBox; al caducar a los 30 s ahora se cierra sola — antes se quedaba y aceptar no servía).
+  Windows no le da el foco del teclado (proceso en segundo plano): hay que hacer clic.
+- ✅ pantalla (DXGI, duplicada: sin driver de pantalla virtual), ratón, texto Unicode (ñ, €, emoji), borrar, Intro.
+- ✅ sonido (WASAPI loopback, 48 kHz s16 estéreo).
+- ✅ gestos: dos dedos mueve (si está maximizada, la restaura bajo el dedo), toque de dos dedos maximiza/restaura,
+  pellizco cambia el tamaño con el mismo centro (mensajes `ventana`/`flotar`/`pinch`; la app los usa cuando
+  `accepted.platform == "windows"`).
+- ✅ teclado automático: UI Automation cada ¼ s (Edit / Document o ComboBox con valor editable, en la pantalla
+  del móvil) → `{"t":"teclado"}`.
+- Falta: micrófono y cámara del móvil (necesitan driver), almacén (WinFsp), escritorio extendido sin driver IddCx,
+  probar con un Windows real (GPU de verdad, varios monitores).
+Compilado en el Nobara con zig (sin mingw): ver README.
+
 ## KDE Plasma (Wayland) — 2026-11-17
 - `src/kde.rs`: monitor virtual con `zkde_screencast_unstable_v1.stream_virtual_output` (como krfb), colocado con
   `kscreen-doctor` según POSITION; ratón/teclado con `org_kde_kwin_fake_input` (el teclado lee el mapa XKB de KWin

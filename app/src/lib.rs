@@ -89,6 +89,7 @@ impl App {
             facing: "user".into(),
             teclado: false,
             teclado_n: 0,
+            platform: String::new(),
             aviso: None,
         }));
         net::discovery(state.clone());
@@ -282,6 +283,8 @@ impl App {
         p.text(btn.center(), egui::Align2::CENTER_CENTER, "\u{F0425}", egui::FontId::proportional(26.0),
                egui::Color32::from_white_alpha(170));
         let events = ui.input(|i| i.events.clone());
+        let win = self.state.lock().unwrap().platform == "windows";
+        let send_gesture = |link: &link::Link, g: Gesture| send_gesture(link, g, win);
         for ev in events {
             // si el teclado de Android acaba mandando teclas a la app (y no al campo invisible)
             if self.kb_shown {
@@ -447,7 +450,22 @@ enum Gesture {
 
 const SUPER_L: u32 = 0xffeb;
 
-fn send_gesture(link: &link::Link, g: Gesture) {
+fn send_gesture(link: &link::Link, g: Gesture, windows: bool) {
+    // Windows no tiene Super+arrastrar ni Super+V: las ventanas las mueve el propio equipo
+    if windows {
+        let j = |v: serde_json::Value| { let _ = link.send_json(v); };
+        match g {
+            Gesture::WinGrab((x0, y0), (x, y)) => {
+                j(serde_json::json!({"t": "ventana", "fase": 0, "x": x0, "y": y0}));
+                j(serde_json::json!({"t": "ventana", "fase": 1, "x": x, "y": y}));
+                return;
+            }
+            Gesture::WinMove(x, y) => return j(serde_json::json!({"t": "ventana", "fase": 1, "x": x, "y": y})),
+            Gesture::WinDrop(x, y) => return j(serde_json::json!({"t": "ventana", "fase": 2, "x": x, "y": y})),
+            Gesture::Float(x, y) => return j(serde_json::json!({"t": "flotar", "x": x, "y": y})),
+            _ => {}
+        }
+    }
     match g {
         Gesture::Move(x, y) => rfb::pointer(link, 0, x, y),
         Gesture::Press(x, y) => rfb::pointer(link, 1, x, y),

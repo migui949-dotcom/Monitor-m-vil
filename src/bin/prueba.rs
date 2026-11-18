@@ -1,11 +1,15 @@
 //! Cliente de prueba que se comporta como la app: descubre, se conecta con Noise, pide la pantalla,
 //! decodifica el H.264 y guarda una captura (PPM). También mueve el ratón y pulsa una tecla.
 //!   prueba <host:puerto> <salida.ppm> [segundos]
+//! PRUEBA_GUION=fichero: tras el primer fotograma se manda, línea a línea:
+//!   esperar <ms> | raton <botones> <x> <y> | tecla <keysym hex> <1|0> | json <mensaje de control>
+//!   captura <fichero.ppm>   (guarda la última imagen recibida en ese momento)
 
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn rf(s: &mut TcpStream) -> Option<Vec<u8>> {
@@ -46,15 +50,23 @@ fn main() {
     hs.read_message(&rf(&mut s).unwrap(), &mut buf).unwrap();
     let n = hs.write_message(&[], &mut buf).unwrap();
     wf(&mut s, &buf[..n]);
-    let mut t = hs.into_transport_mode().unwrap();
-
-    let mut send = |s: &mut TcpStream, t: &mut snow::TransportState, ch: u8, d: &[u8]| {
-        let mut p = vec![ch];
-        p.extend_from_slice(d);
-        let n = t.write_message(&p, &mut buf).unwrap();
-        let c = buf[..n].to_vec();
-        wf(s, &c);
+    let tr = Arc::new(Mutex::new(hs.into_transport_mode().unwrap()));
+    let ws = Arc::new(Mutex::new(s.try_clone().unwrap()));
+    let send_to = {
+        let (tr, ws) = (tr.clone(), ws.clone());
+        move |ch: u8, d: &[u8]| {
+            let mut p = vec![ch];
+            p.extend_from_slice(d);
+            let mut b = vec![0u8; 65535];
+            let n = tr.lock().unwrap().write_message(&p, &mut b).unwrap();
+            wf(&mut ws.lock().unwrap(), &b[..n]);
+        }
     };
+    let send = |_s: &mut TcpStream, _t: &mut (), ch: u8, d: &[u8]| send_to(ch, d);
+    let mut t = ();
+    // última imagen, para las capturas del guion
+    let shot: Arc<Mutex<Option<(usize, usize, Vec<u8>)>>> = Arc::new(Mutex::new(None));
+    let mut guion: Option<std::thread::JoinHandle<()>> = None;
     // PRUEBA_DEVICE / PRUEBA_WANT (p. ej. "screen,audio") para simular varios móviles distintos
     let device = std::env::var("PRUEBA_DEVICE").unwrap_or_else(|_| "Prueba".into());
     let want: Vec<String> = std::env::var("PRUEBA_WANT").unwrap_or_else(|_| "screen".into()).split(',').map(|w| format!("\"{w}\"")).collect();
@@ -69,22 +81,30 @@ fn main() {
     let mut last_img: Option<(usize, usize, Vec<u8>)> = None;
     let t0 = Instant::now();
     let mut started: Option<Instant> = None;
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let mut pbuf = vec![0u8; 65535];
     let mut moved = false;
+    let mut otros: std::collections::BTreeMap<u8, usize> = Default::default();
     loop {
-        if started.map(|x| x.elapsed().as_secs() >= secs).unwrap_or(false) {
+        // con guion, se sigue hasta que acabe (y como mucho `secs`)
+        let guion_vivo = guion.as_ref().map(|g| !g.is_finished()).unwrap_or(false);
+        if started.map(|x| x.elapsed().as_secs() >= secs).unwrap_or(false) || (guion.is_some() && !guion_vivo) {
             break;
         }
         // pantalla quieta (sin imágenes nuevas): se termina con lo que haya
-        let Some(c) = rf(&mut s) else { println!("(sin imágenes nuevas en 10 s)"); break };
-        let n = t.read_message(&c, &mut pbuf).unwrap();
+        let Some(c) = rf(&mut s) else {
+            if guion.as_ref().map(|g| !g.is_finished()).unwrap_or(false) { continue; }
+            println!("(sin imágenes nuevas en 30 s)");
+            break;
+        };
+        let n = tr.lock().unwrap().read_message(&c, &mut pbuf).unwrap();
         let m = &pbuf[..n];
         if m[0] == 0 {
             println!("control: {}", String::from_utf8_lossy(&m[1..]));
             continue;
         }
         if m[0] != 1 {
+            *otros.entry(m[0]).or_insert(0usize) += m.len() - 1;
             continue;
         }
         rfb.extend_from_slice(&m[1..]);
@@ -136,12 +156,18 @@ fn main() {
                     if started.is_none() {
                         started = Some(Instant::now());
                         println!("primer fotograma a los {:?} ({} bytes)", t0.elapsed(), len);
+                        if let Ok(f) = std::env::var("PRUEBA_GUION") {
+                            let txt = std::fs::read_to_string(&f).unwrap();
+                            let (send_to, shot) = (send_to.clone(), shot.clone());
+                            guion = Some(std::thread::spawn(move || run_script(&txt, &send_to, &shot)));
+                        }
                     }
                     for nal in openh264::nal_units(&data) {
                         if let Ok(Some(img)) = dec.decode(nal) {
                             let (w, h) = img.dimensions();
                             let mut rgb = vec![0u8; w * h * 3];
                             img.write_rgb8(&mut rgb);
+                            *shot.lock().unwrap() = Some((w, h, rgb.clone()));
                             last_img = Some((w, h, rgb));
                         }
                     }
@@ -159,11 +185,52 @@ fn main() {
     }
     let dt = started.map(|x| x.elapsed().as_secs_f64()).unwrap_or(1.0);
     println!("{frames} fotogramas en {dt:.1} s ({:.1} fps, {:.0} kB/s)", frames as f64 / dt, bytes as f64 / dt / 1000.0);
+    for (ch, n) in &otros {
+        println!("canal {ch}: {n} bytes");
+    }
     send(&mut s, &mut t, 0, br#"{"t":"bye"}"#);
     if let Some((w, h, rgb)) = last_img {
         let mut f = std::fs::File::create(out).unwrap();
         write!(f, "P6\n{w} {h}\n255\n").unwrap();
         f.write_all(&rgb).unwrap();
         println!("captura: {out} ({w}x{h})");
+    }
+}
+
+fn save_ppm(path: &str, img: &Option<(usize, usize, Vec<u8>)>) {
+    if let Some((w, h, rgb)) = img {
+        let mut f = std::fs::File::create(path).unwrap();
+        write!(f, "P6\n{w} {h}\n255\n").unwrap();
+        f.write_all(rgb).unwrap();
+        println!("captura: {path} ({w}x{h})");
+    }
+}
+
+fn run_script(txt: &str, send: &dyn Fn(u8, &[u8]), shot: &Mutex<Option<(usize, usize, Vec<u8>)>>) {
+    for line in txt.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let nums: Vec<i64> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+        match cmd {
+            "esperar" => std::thread::sleep(Duration::from_millis(nums[0] as u64)),
+            "raton" => {
+                let (m, x, y) = (nums[0] as u8, nums[1] as u16, nums[2] as u16);
+                let mut p = vec![5, m];
+                p.extend_from_slice(&x.to_be_bytes());
+                p.extend_from_slice(&y.to_be_bytes());
+                send(1, &p);
+            }
+            "tecla" => {
+                let mut it = rest.split_whitespace();
+                let sym = u32::from_str_radix(it.next().unwrap().trim_start_matches("0x"), 16).unwrap();
+                let down = it.next() == Some("1");
+                let mut p = vec![4, down as u8, 0, 0];
+                p.extend_from_slice(&sym.to_be_bytes());
+                send(1, &p);
+            }
+            "json" => send(0, rest.as_bytes()),
+            "captura" => save_ppm(rest, &shot.lock().unwrap()),
+            _ => println!("guion: no entiendo «{line}»"),
+        }
+        println!("guion: {line}");
     }
 }

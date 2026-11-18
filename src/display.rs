@@ -40,6 +40,11 @@ pub trait Display: Send + Sync {
     fn text(&self, s: &str) {
         type_keys(self, s);
     }
+    /// Mover con dos dedos la ventana que hay en (x, y): fase 0 la coge, 1 la lleva, 2 la suelta.
+    /// (En Linux no hace falta: la app usa Super + arrastrar.)
+    fn window_drag(&self, _fase: u8, _x: u16, _y: u16) {}
+    /// Toque con dos dedos en Windows: maximizar / restaurar la ventana que hay en (x, y).
+    fn window_toggle(&self, _x: u16, _y: u16) {}
     /// Avisar (true/false) cuando una app del monitor del móvil quiere o deja de querer teclado.
     fn on_keyboard(&self, _f: Box<dyn Fn(bool) + Send + Sync>) {}
 }

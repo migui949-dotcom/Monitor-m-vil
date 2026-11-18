@@ -67,6 +67,8 @@ pub struct Shared {
     /// el ordenador pide teclado (campo de texto activo en el monitor del móvil) y cuántas veces lo ha pedido
     pub teclado: bool,
     pub teclado_n: u32,
+    /// sistema del ordenador de la sesión ("linux", "windows"…): los gestos de ventanas cambian
+    pub platform: String,
 }
 
 pub type State = Arc<Mutex<Shared>>;
@@ -297,6 +299,7 @@ fn session(state: &State, ident: &Identity, host: &Host, device: &str) -> Result
             Some("waiting") => state.lock().unwrap().status = Status::Waiting(host.name.clone()),
             Some("accepted") => {
                 screen = v["screen"].as_bool().unwrap_or(false);
+                state.lock().unwrap().platform = v["platform"].as_str().unwrap_or("").to_string();
                 state.lock().unwrap().screen_error = if screen { None } else {
                     Some(v["screen_error"].as_str().unwrap_or("El ordenador no ha abierto el escritorio").to_string())
                 };

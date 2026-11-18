@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::{HMODULE, RECT};
+use windows::Win32::Foundation::{HMODULE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
@@ -95,11 +95,15 @@ pub fn capability() -> String {
 enum Input {
     Pointer(u16, u16, u8),
     Key(u32, bool),
+    Pinch(u8, u16, u16, f32),
+    Drag(u8, u16, u16),
+    Toggle(u16, u16),
 }
 
 struct Win {
     w: u32,
     h: u32,
+    rect: RECT,
     slot: Arc<FrameSlot>,
     stop: Arc<AtomicBool>,
     input: Mutex<std::sync::mpsc::Sender<Input>>,
@@ -117,6 +121,19 @@ impl Display for Win {
     }
     fn key(&self, keysym: u32, down: bool) {
         let _ = self.input.lock().unwrap().send(Input::Key(keysym, down));
+    }
+    fn pinch(&self, fase: u8, x: u16, y: u16, escala: f32) {
+        let _ = self.input.lock().unwrap().send(Input::Pinch(fase, x, y, escala));
+    }
+    fn window_drag(&self, fase: u8, x: u16, y: u16) {
+        let _ = self.input.lock().unwrap().send(Input::Drag(fase, x, y));
+    }
+    fn window_toggle(&self, x: u16, y: u16) {
+        let _ = self.input.lock().unwrap().send(Input::Toggle(x, y));
+    }
+    fn on_keyboard(&self, f: Box<dyn Fn(bool) + Send + Sync>) {
+        let (stop, rect) = (self.stop.clone(), self.rect);
+        let _ = std::thread::Builder::new().name("teclado".into()).spawn(move || keyboard_watch(f, rect, &stop));
     }
 }
 
@@ -150,7 +167,7 @@ pub fn open(_w: u32, _h: u32) -> Result<Arc<dyn Display>, String> {
         let stop = stop.clone();
         std::thread::Builder::new().name("entrada".into()).spawn(move || input_loop(rx, rect, &stop)).map_err(|e| e.to_string())?;
     }
-    Ok(Arc::new(Win { w, h, slot, stop, input: Mutex::new(tx) }))
+    Ok(Arc::new(Win { w, h, rect, slot, stop, input: Mutex::new(tx) }))
 }
 
 // ───────────── Captura ─────────────
@@ -321,13 +338,57 @@ fn input_loop(rx: std::sync::mpsc::Receiver<Input>, rect: RECT, stop: &AtomicBoo
     let mut prev = 0u8;
     let mut held_mods = 0u32; // ctrl/alt/win pulsadas (cambia cómo se mandan las letras)
     let mut down_unicode: Vec<u32> = vec![];
+    // ventana cogida con dos dedos (mover o cambiar de tamaño) y pellizco pendiente de aplicar
+    let mut grab: Option<Grab> = None;
+    let mut pinch: Option<Grab> = None;
+    let mut pinch_scale: Option<f32> = None;
+    let mut pinch_last = Instant::now();
+    let at = |x: u16, y: u16| POINT { x: rect.left + x as i32, y: rect.top + y as i32 };
     while !stop.load(Ordering::Relaxed) {
-        let ev = match rx.recv_timeout(Duration::from_millis(500)) {
+        if let (Some(p), Some(e)) = (&pinch, pinch_scale) {
+            if pinch_last.elapsed() >= Duration::from_millis(30) {
+                p.resize(e);
+                pinch_scale = None;
+                pinch_last = Instant::now();
+            }
+        }
+        let wait = if pinch_scale.is_some() { 15 } else { 500 };
+        let ev = match rx.recv_timeout(Duration::from_millis(wait)) {
             Ok(e) => e,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(_) => break,
         };
         match ev {
+            Input::Pinch(fase, x, y, e) => match fase {
+                0 => {
+                    pinch = Grab::at(at(x, y)).filter(|g| !g.zoomed);
+                    pinch_scale = None;
+                }
+                1 => pinch_scale = Some(e),
+                _ => {
+                    if let Some(p) = pinch.take() {
+                        p.resize(pinch_scale.take().unwrap_or(e));
+                    }
+                    pinch_scale = None;
+                }
+            },
+            Input::Drag(fase, x, y) => match fase {
+                0 => grab = Grab::at(at(x, y)).map(|g| g.unzoom(at(x, y))),
+                1 => {
+                    if let Some(g) = &grab {
+                        g.move_to(at(x, y));
+                    }
+                }
+                _ => grab = None,
+            },
+            Input::Toggle(x, y) => {
+                if let Some(g) = Grab::at(at(x, y)) {
+                    unsafe {
+                        let _ = SetForegroundWindow(g.hwnd);
+                        let _ = ShowWindow(g.hwnd, if g.zoomed { SW_RESTORE } else { SW_MAXIMIZE });
+                    }
+                }
+            }
             Input::Pointer(x, y, mask) => {
                 let (vx, vy, vw, vh) = unsafe {
                     (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN))
@@ -394,15 +455,184 @@ fn input_loop(rx: std::sync::mpsc::Receiver<Input>, rect: RECT, stop: &AtomicBoo
     }
 }
 
+// ───────────── Ventanas con los dedos ─────────────
+
+/// Ventana de primer nivel cogida en `p0`, con su rectángulo de entonces
+struct Grab {
+    hwnd: HWND,
+    r0: RECT,
+    p0: POINT,
+    zoomed: bool,
+}
+
+impl Grab {
+    /// La ventana que hay en `p` (no el escritorio ni la barra de tareas)
+    fn at(p: POINT) -> Option<Grab> {
+        unsafe {
+            let h = WindowFromPoint(p);
+            if h.0.is_null() {
+                return None;
+            }
+            let h = GetAncestor(h, GA_ROOT);
+            if h.0.is_null() {
+                return None;
+            }
+            let mut cls = [0u16; 64];
+            let n = GetClassNameW(h, &mut cls) as usize;
+            let cls = String::from_utf16_lossy(&cls[..n]);
+            if ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"].contains(&cls.as_str()) {
+                return None;
+            }
+            let mut r0 = RECT::default();
+            GetWindowRect(h, &mut r0).ok()?;
+            Some(Grab { hwnd: h, r0, p0: p, zoomed: IsZoomed(h).as_bool() })
+        }
+    }
+
+    /// Maximizada no se puede mover: se restaura (como al arrastrar la barra de título) bajo el dedo
+    fn unzoom(mut self, p: POINT) -> Grab {
+        unsafe {
+            let _ = SetForegroundWindow(self.hwnd);
+            if self.zoomed {
+                let _ = ShowWindow(self.hwnd, SW_RESTORE);
+                let mut r = RECT::default();
+                let _ = GetWindowRect(self.hwnd, &mut r);
+                let (w, h) = (r.right - r.left, r.bottom - r.top);
+                let x = p.x - w / 2;
+                let y = p.y - 20;
+                let _ = SetWindowPos(self.hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                self.r0 = RECT { left: x, top: y, right: x + w, bottom: y + h };
+                self.zoomed = false;
+            }
+        }
+        self.p0 = p;
+        self
+    }
+
+    fn move_to(&self, p: POINT) {
+        let (x, y) = (self.r0.left + p.x - self.p0.x, self.r0.top + p.y - self.p0.y);
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    /// Tamaño = el inicial × `e`, mismo centro, dentro del área de trabajo de su monitor
+    fn resize(&self, e: f32) {
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+        let e = e.clamp(0.1, 10.0) as f64;
+        let r = self.r0;
+        let (w0, h0) = ((r.right - r.left) as f64, (r.bottom - r.top) as f64);
+        let (cx, cy) = (r.left as f64 + w0 / 2.0, r.top as f64 + h0 / 2.0);
+        unsafe {
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let _ = GetMonitorInfoW(MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST), &mut mi);
+            let wa = mi.rcWork;
+            let (mw, mh) = ((wa.right - wa.left) as f64, (wa.bottom - wa.top) as f64);
+            let w = (w0 * e).clamp(300.0_f64.min(w0), mw).round();
+            let h = (h0 * e).clamp(200.0_f64.min(h0), mh).round();
+            let x = (cx - w / 2.0).clamp(wa.left as f64, wa.left as f64 + mw - w).round();
+            let y = (cy - h / 2.0).clamp(wa.top as f64, wa.top as f64 + mh - h).round();
+            let _ = SetWindowPos(self.hwnd, None, x as i32, y as i32, w as i32, h as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+// ───────────── Teclado del móvil ─────────────
+
+/// Mira cada ~¼ s con UI Automation si lo que tiene el foco es un campo de texto editable
+/// en la pantalla del móvil; al cambiar, avisa al móvil para que saque o quite su teclado.
+fn keyboard_watch(f: Box<dyn Fn(bool) + Send + Sync>, rect: RECT, stop: &AtomicBool) {
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+    use windows::Win32::UI::Accessibility::*;
+    dpi_aware();
+    let uia: IUIAutomation = match unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+    } {
+        Ok(u) => u,
+        Err(e) => {
+            crate::host::log(&format!("teclado del móvil: UI Automation no disponible: {e}"));
+            return;
+        }
+    };
+    let editable = || -> Option<bool> {
+        unsafe {
+            let el = uia.GetFocusedElement().ok()?;
+            let ct = el.CurrentControlType().ok()?;
+            let value = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId).ok();
+            let writable = value.as_ref().map(|v| v.CurrentIsReadOnly().map(|r| !r.as_bool()).unwrap_or(false));
+            let ok = match ct {
+                c if c == UIA_EditControlTypeId => writable.unwrap_or(true),
+                c if c == UIA_DocumentControlTypeId || c == UIA_ComboBoxControlTypeId => writable.unwrap_or(false),
+                _ => false,
+            };
+            if !ok || !el.CurrentIsEnabled().ok()?.as_bool() {
+                return Some(false);
+            }
+            // solo si está en la pantalla del móvil
+            let b = el.CurrentBoundingRectangle().ok()?;
+            let (x, y) = ((b.left + b.right) / 2, (b.top + b.bottom) / 2);
+            Some(x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
+        }
+    };
+    let mut shown = false;
+    let mut off_since: Option<Instant> = None;
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(250));
+        let want = editable().unwrap_or(false);
+        if want {
+            off_since = None;
+            if !shown {
+                shown = true;
+                f(true);
+            }
+        } else if shown {
+            // un poco de margen: al pasar de un campo a otro el foco salta por medio
+            let t = *off_since.get_or_insert_with(Instant::now);
+            if t.elapsed() >= Duration::from_millis(500) {
+                shown = false;
+                off_since = None;
+                f(false);
+            }
+        }
+    }
+}
+
 // ───────────── Permiso ─────────────
 
 pub async fn ask_permission(device: &str, fp: &str, via: &str, timeout: u64) -> bool {
     let text: Vec<u16> = format!("{device} quiere conectarse a este equipo.\n\nPor {via} · huella {fp}\n\n¿Aceptar?\0").encode_utf16().collect();
     let title: Vec<u16> = "Pantalla\0".encode_utf16().collect();
+    let (tid_tx, tid_rx) = std::sync::mpsc::channel();
     let task = tokio::task::spawn_blocking(move || unsafe {
+        let _ = tid_tx.send(windows::Win32::System::Threading::GetCurrentThreadId());
         MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND | MB_SYSTEMMODAL) == IDYES
     });
-    matches!(tokio::time::timeout(Duration::from_secs(timeout), task).await, Ok(Ok(true)))
+    let tid = tid_rx.recv_timeout(Duration::from_secs(2)).ok();
+    let mut task = task;
+    match tokio::time::timeout(Duration::from_secs(timeout), &mut task).await {
+        Ok(Ok(yes)) => yes,
+        _ => {
+            // se acabó el tiempo: la ventana se cierra (si no, se quedaba ahí y aceptar ya no servía)
+            if let Some(tid) = tid {
+                close_thread_windows(tid);
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+            false
+        }
+    }
+}
+
+/// Cierra las ventanas de un hilo (el cuadro de diálogo de permiso que ha caducado)
+fn close_thread_windows(tid: u32) {
+    use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
+    unsafe extern "system" fn cerrar(h: HWND, _: LPARAM) -> BOOL {
+        let _ = PostMessageW(h, WM_CLOSE, WPARAM(0), LPARAM(0));
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumThreadWindows(tid, Some(cerrar), LPARAM(0));
+    }
 }
 
 // ───────────── Utilidades ─────────────

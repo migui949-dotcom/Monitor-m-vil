@@ -11,8 +11,8 @@ Dos piezas:
 |---|---|---|
 | Monitor extra por wifi o cable USB | ✅ | ✅ con driver de pantalla virtual; si no, duplica |
 | Ratón y teclado (cualquier distribución de teclado) | ✅ | ✅ |
-| Gestos táctiles: mover / hacer flotante / pellizco para cambiar el tamaño de ventanas | ✅ Hyprland (pellizco) | — |
-| Teclado del móvil al tocar un campo de texto (o a mano desde el menú) | ✅ Hyprland (solo) · a mano en todos | a mano |
+| Gestos táctiles: mover / flotante (Windows: maximizar) / pellizco para cambiar el tamaño de ventanas | ✅ Hyprland | ✅ |
+| Teclado del móvil al tocar un campo de texto (o a mano desde el menú) | ✅ Hyprland (solo) · a mano en todos | ✅ (UI Automation) |
 | Sonido del ordenador en el móvil | ✅ | ✅ |
 | **Micrófono del móvil** — siempre en la lista de micrófonos, se enciende solo al usarlo | ✅ | — |
 | **Cámara del móvil** — webcam "Camara del movil", se enciende sola al usarla | ✅ | — |
@@ -73,9 +73,9 @@ Para compilarla tú: `app/build.sh` (Rust + NDK, sin Gradle).
 | Gesto | Qué hace |
 |---|---|
 | Tocar / arrastrar / mantener | clic / arrastrar / clic derecho |
-| Dos dedos arrastrando | mover la ventana (Super + arrastrar) |
-| Toque con dos dedos | ventana flotante o de vuelta al mosaico (Super+V) |
-| Pellizco (juntar / separar dos dedos) | encoger / agrandar la ventana flotante |
+| Dos dedos arrastrando | mover la ventana (Linux: Super + arrastrar; Windows: la mueve el equipo) |
+| Toque con dos dedos | Linux: ventana flotante o de vuelta al mosaico (Super+V) · Windows: maximizar / restaurar |
+| Pellizco (juntar / separar dos dedos) | encoger / agrandar la ventana (en Linux, si es flotante) |
 | Tres dedos arrastrando | rueda del ratón (vertical y horizontal) |
 | Toque con tres dedos | menú de la app (desconectar, cámara, micro, teclado…) |
 

@@ -834,7 +834,7 @@ async fn session(
     write_status();
 
     // si no hay escritorio, el motivo va al móvil para que lo enseñe
-    let accepted = json!({"t": "accepted", "name": host_name(), "screen": display.is_some(), "screen_error": screen_error});
+    let accepted = json!({"t": "accepted", "name": host_name(), "platform": platform(), "screen": display.is_some(), "screen_error": screen_error});
     out_tx.send((0, accepted.to_string().into_bytes()))?;
 
     if let Some(d) = &display {
@@ -985,6 +985,18 @@ async fn session(
                         if let Some(d) = &display {
                             let n = |k: &str| m[k].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16;
                             d.pinch(m["fase"].as_u64().unwrap_or(2) as u8, n("x"), n("y"), m["s"].as_f64().unwrap_or(1.0) as f32);
+                        }
+                    }
+                    "ventana" => {
+                        if let Some(d) = &display {
+                            let n = |k: &str| m[k].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16;
+                            d.window_drag(m["fase"].as_u64().unwrap_or(2) as u8, n("x"), n("y"));
+                        }
+                    }
+                    "flotar" => {
+                        if let Some(d) = &display {
+                            let n = |k: &str| m[k].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16;
+                            d.window_toggle(n("x"), n("y"));
                         }
                     }
                     "texto" => {

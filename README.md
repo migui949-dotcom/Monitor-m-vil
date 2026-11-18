@@ -11,6 +11,8 @@ Dos piezas:
 |---|---|---|
 | Monitor extra por wifi o cable USB | ✅ | ✅ con driver de pantalla virtual; si no, duplica |
 | Ratón y teclado (cualquier distribución de teclado) | ✅ | ✅ |
+| Gestos táctiles: mover / hacer flotante / pellizco para cambiar el tamaño de ventanas | ✅ Hyprland (pellizco) | — |
+| Teclado del móvil al tocar un campo de texto (o a mano desde el menú) | ✅ Hyprland (solo) · a mano en todos | a mano |
 | Sonido del ordenador en el móvil | ✅ | ✅ |
 | **Micrófono del móvil** — siempre en la lista de micrófonos, se enciende solo al usarlo | ✅ | — |
 | **Cámara del móvil** — webcam "Camara del movil", se enciende sola al usarla | ✅ | — |
@@ -66,11 +68,28 @@ internet" con su cortafuegos propio, y que Android no la cierre).
 
 Para compilarla tú: `app/build.sh` (Rust + NDK, sin Gradle).
 
+## Gestos en el móvil
+
+| Gesto | Qué hace |
+|---|---|
+| Tocar / arrastrar / mantener | clic / arrastrar / clic derecho |
+| Dos dedos arrastrando | mover la ventana (Super + arrastrar) |
+| Toque con dos dedos | ventana flotante o de vuelta al mosaico (Super+V) |
+| Pellizco (juntar / separar dos dedos) | encoger / agrandar la ventana flotante |
+| Tres dedos arrastrando | rueda del ratón (vertical y horizontal) |
+| Toque con tres dedos | menú de la app (desconectar, cámara, micro, teclado…) |
+
+El teclado sale solo cuando una app del monitor del móvil activa un campo de texto (text-input-v3:
+GTK, Qt, Firefox; Chromium/Brave con `--enable-wayland-ime --wayland-text-input-version=3`).
+
 ## Compilar
 
 ```sh
 cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.31 --bin pantalla-host  # Linux compatible (glibc ≥ 2.31)
 cargo build --release --target x86_64-pc-windows-gnu --bin pantalla-host             # Windows (g++-mingw-w64-x86-64)
+# Windows sin mingw, con zig:
+RUSTFLAGS="-C target-feature=+crt-static" CXXSTDLIB_x86_64_pc_windows_gnu=c++ \
+  cargo zigbuild --release --target x86_64-pc-windows-gnu --bin pantalla-host
 ```
 
 Hace falta `nasm` en el PATH: sin él OpenH264 se compila sin ensamblador y va ~2,5 veces más lento

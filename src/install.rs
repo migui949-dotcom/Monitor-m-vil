@@ -158,6 +158,10 @@ pub fn install(_replace: bool) -> Result<(), String> {
     if me != dest {
         std::fs::copy(&me, &dest).map_err(|e| format!("copiar: {e}"))?;
     }
+    // Windows 11: la cámara del móvil necesita registrarse una vez para todo el equipo (permiso de administrador)
+    if crate::wincam::needs_register() && !crate::wincam::elevated("registrar-camara") {
+        println!("Sin la cámara del móvil: no se ha dado el permiso de administrador (se puede volver a instalar).");
+    }
     let value = format!("\"{}\"", dest.display());
     if !run("reg", &["add", RUN_KEY, "/v", "Pantalla", "/t", "REG_SZ", "/d", &value, "/f"]) {
         return Err("no se pudo añadir al inicio de sesión".into());
@@ -174,6 +178,9 @@ pub fn install(_replace: bool) -> Result<(), String> {
 #[cfg(windows)]
 pub fn uninstall() -> Result<(), String> {
     run("reg", &["delete", RUN_KEY, "/v", "Pantalla", "/f"]);
+    if !crate::wincam::needs_register() {
+        crate::wincam::elevated("quitar-camara");
+    }
     run("taskkill", &["/F", "/IM", "pantalla-host.exe", "/FI", &format!("PID ne {}", std::process::id())]);
     let _ = std::fs::remove_file(dir().join("pantalla-host.exe"));
     println!("Desinstalado.");

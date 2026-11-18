@@ -31,8 +31,16 @@ Máquina de pruebas: Windows 11 25H2 Enterprise de evaluación en QEMU/KVM en el
   `accepted.platform == "windows"`).
 - ✅ teclado automático: UI Automation cada ¼ s (Edit / Document o ComboBox con valor editable, en la pantalla
   del móvil) → `{"t":"teclado"}`.
-- Falta: micrófono y cámara del móvil (necesitan driver), almacén (WinFsp), escritorio extendido sin driver IddCx,
-  probar con un Windows real (GPU de verdad, varios monitores).
+- ✅ (0.7.0) cámara del móvil en **Windows 11**: «Cámara del móvil» con MFCreateVirtualCamera + fuente de Media
+  Foundation propia (`camara-win/`, DLL COM que carga el servicio de cámaras; registrada en HKLM con un permiso de
+  administrador al instalar, en %ProgramFiles%\Pantalla con la versión en el nombre). Imágenes por la memoria
+  compartida `Global\PantallaCamaraMovil` (la crea la DLL). Se enciende sola al abrirla una app y se apaga a los
+  10 s. Probado con el MI 9: 30 fps, imagen real del móvil. `pantalla-host probar-camara [leer]` = prueba sin apps.
+- ✅ (0.7.0) vídeo con el codificador de la tarjeta gráfica (Media Foundation, asíncrono, baja latencia, sin B,
+  VBR con techo). Probado en la VM solo el camino síncrono (`ENCODER=mf-sw`, codificador de software de Windows,
+  3,5 ms/imagen): la VM no tiene GPU. **El de hardware está sin probar en un Windows real.**
+- Falta: micrófono (necesita driver, p. ej. VB-CABLE), almacén (WinFsp), escritorio extendido sin driver IddCx,
+  cámara en Windows 10, probar en un Windows real (GPU, varios monitores).
 Compilado en el Nobara con zig (sin mingw): ver README.
 
 ## KDE Plasma (Wayland) — 2026-11-17

@@ -80,7 +80,6 @@ fn max_phones() -> u8 {
 }
 
 /// (ranura, marca de su sesión) de cada móvil conectado: para olvidar lo encendido en una sesión anterior
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn session_marks() -> Vec<(u8, u64)> {
     st().sessions.iter().map(|(k, v)| (*k, v.since.to_bits())).collect()
 }
@@ -115,7 +114,10 @@ fn facing(s: &Sess) -> String {
 fn media_json(slot: u8, s: &Sess) -> Value {
     #[cfg(target_os = "linux")]
     let (fps, cam_dev) = (crate::devices::fps(slot), crate::devices::webcam(slot));
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    let (fps, cam_dev): (f32, Option<(String, String)>) =
+        (crate::wincam::fps(), crate::wincam::ready().then(|| ("Cámara del móvil".to_string(), "Cámara del móvil".to_string())));
+    #[cfg(not(any(target_os = "linux", windows)))]
     let (fps, cam_dev): (f32, Option<(String, String)>) = (0.0, None);
     #[cfg(target_os = "linux")]
     let mic_source = crate::audio::mic_name(slot);
@@ -534,15 +536,21 @@ fn set_cam(slot: u8, on: Option<bool>, flip: bool) -> bool {
         if !x.cam_on {
             crate::devices::cam_off(slot);
         }
+        #[cfg(windows)]
+        if !x.cam_on {
+            crate::wincam::cam_off();
+        }
         // sin webcam en este ordenador se puede ver igual en el panel, pero se avisa
         if x.cam_on {
             if let Some(why) = x.cam_unavailable.clone() {
                 x.media_error = why;
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
         if x.cam_on {
-            x.media_error = "La cámara del móvil aún no funciona en Windows".into();
+            if let Some(why) = crate::wincam::unavailable() {
+                x.media_error = why;
+            }
         }
     }
     send_media(slot, &ctl);
@@ -1007,6 +1015,8 @@ async fn session(
                     "cam_rot" => {
                         #[cfg(target_os = "linux")]
                         crate::devices::set_rot(slot, m["deg"].as_i64().unwrap_or(0) as i32);
+                        #[cfg(windows)]
+                        crate::wincam::set_rot(m["deg"].as_i64().unwrap_or(0) as i32);
                     }
                     "standby_set" => {
                         let on = m["on"].as_bool().unwrap_or(false);
@@ -1050,6 +1060,10 @@ async fn session(
                 #[cfg(target_os = "linux")]
                 if st().sessions.get(&slot).map(|x| x.cam_on).unwrap_or(false) {
                     crate::devices::feed(slot, body);
+                }
+                #[cfg(windows)]
+                if st().sessions.get(&slot).map(|x| x.cam_on).unwrap_or(false) {
+                    crate::wincam::feed(body);
                 }
             }
             1 => {
@@ -1168,6 +1182,8 @@ fn cleanup() {
         crate::devices::start();
         crate::storage::unmount_all();
     }
+    #[cfg(windows)]
+    crate::wincam::start();
 }
 
 pub async fn run() -> Res<()> {

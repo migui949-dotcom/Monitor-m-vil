@@ -15,7 +15,7 @@ Dos piezas:
 | Teclado del móvil al tocar un campo de texto (o a mano desde el menú) | ✅ Hyprland (solo) · a mano en todos | ✅ (UI Automation) |
 | Sonido del ordenador en el móvil | ✅ | ✅ |
 | **Micrófono del móvil** — siempre en la lista de micrófonos, se enciende solo al usarlo | ✅ | — |
-| **Cámara del móvil** — webcam "Camara del movil", se enciende sola al usarla | ✅ | — |
+| **Cámara del móvil** — webcam "Camara del movil", se enciende sola al usarla | ✅ | ✅ Windows 11 (permiso de administrador una vez al instalar) |
 | Almacén del móvil en `~/Móvil` | ✅ | — |
 | Panel "Escritorio" y menú en fuzzel/rofi/wofi | ✅ | — |
 | **Varios móviles a la vez** (hasta 4), cada uno con su monitor, sonido, micro, webcam y carpeta | ✅ | — (uno) |
@@ -91,6 +91,11 @@ cargo build --release --target x86_64-pc-windows-gnu --bin pantalla-host        
 RUSTFLAGS="-C target-feature=+crt-static" CXXSTDLIB_x86_64_pc_windows_gnu=c++ \
   cargo zigbuild --release --target x86_64-pc-windows-gnu --bin pantalla-host
 ```
+
+En Windows, la cámara virtual es una DLL aparte (`camara-win/`) que va dentro del .exe: compílala antes
+(`cd camara-win && cargo zigbuild --release --target x86_64-pc-windows-gnu`, con el mismo `RUSTFLAGS`); sin
+ella el .exe sale sin cámara (`build.rs` avisa). Vídeo en Windows: codificador de la tarjeta gráfica con Media
+Foundation (NVENC / Quick Sync / AMF), si no hay, OpenH264; `ENCODER=openh264` o `ENCODER=mf-sw` en host.conf.
 
 Hace falta `nasm` en el PATH: sin él OpenH264 se compila sin ensamblador y va ~2,5 veces más lento
 (`build.rs` avisa). Si se instala después: `cargo clean -p openh264-sys2`.

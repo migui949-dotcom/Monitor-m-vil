@@ -11,6 +11,7 @@
 // En Windows no se abre una consola al arrancar con la sesión
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod camimg;
 mod display;
 mod host;
 mod install;
@@ -42,6 +43,10 @@ mod sistema;
 mod storage;
 #[cfg(target_os = "linux")]
 mod teclado;
+#[cfg(windows)]
+mod mfenc;
+#[cfg(windows)]
+mod wincam;
 #[cfg(windows)]
 mod winaudio;
 #[cfg(windows)]
@@ -134,6 +139,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(windows)]
+        "registrar-camara" => {
+            // lo lanza `instalar` como administrador
+            if let Err(e) = wincam::register() {
+                windows::message("Pantalla", &format!("No se pudo instalar la cámara: {e}"));
+                std::process::exit(1);
+            }
+        }
+        #[cfg(windows)]
+        "quitar-camara" => wincam::unregister(),
+        #[cfg(windows)]
+        "probar-camara" => wincam::self_test(args.get(1).map(String::as_str) == Some("leer")),
         "desinstalar" | "uninstall" => {
             if let Err(e) = install::uninstall() {
                 eprintln!("{e}");

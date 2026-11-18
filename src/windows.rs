@@ -623,11 +623,12 @@ pub async fn ask_permission(device: &str, fp: &str, via: &str, timeout: u64) -> 
     }
 }
 
-/// Cierra las ventanas de un hilo (el cuadro de diálogo de permiso que ha caducado)
+/// Contesta «No» en las ventanas de un hilo (el cuadro de diálogo de permiso que ha caducado)
 fn close_thread_windows(tid: u32) {
     use windows::Win32::Foundation::{BOOL, LPARAM, WPARAM};
+    // un cuadro Sí/No no tiene «Cancelar» y no hace caso de WM_CLOSE: se le «pulsa» No
     unsafe extern "system" fn cerrar(h: HWND, _: LPARAM) -> BOOL {
-        let _ = PostMessageW(h, WM_CLOSE, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(h, WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0));
         BOOL(1)
     }
     unsafe {

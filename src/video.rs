@@ -15,12 +15,18 @@ pub fn bitrate(w: usize, h: usize, fps: f32) -> u32 {
 pub struct Encoder {
     #[cfg(target_os = "linux")]
     hw: Option<crate::hwenc::HwEnc>,
+    #[cfg(windows)]
+    mf: Option<crate::mfenc::MfEnc>,
     soft: Option<H264>,
     w: usize,
     h: usize,
     fps: f32,
     soft_started: bool,
 }
+
+/// Media Foundation ya falló en este equipo (no se reintenta en cada conexión)
+#[cfg(windows)]
+static MF_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Métodos por hardware que ya fallaron en este equipo (no se reintentan en cada conexión)
 #[cfg(target_os = "linux")]
@@ -43,9 +49,26 @@ impl Encoder {
                 }
             }
         }
+        // Windows: el codificador de la tarjeta gráfica con Media Foundation
+        // (ENCODER=openh264 lo desactiva; ENCODER=mf-sw usa el de software de Windows, para pruebas)
+        #[cfg(windows)]
+        {
+            let pref = crate::util::conf("ENCODER").unwrap_or_else(|| "auto".into()).to_lowercase();
+            if !matches!(pref.as_str(), "openh264" | "software" | "soft") && !MF_BROKEN.load(std::sync::atomic::Ordering::Relaxed) {
+                match crate::mfenc::MfEnc::new(w, h, fps, bitrate(w, h, fps), pref != "mf-sw") {
+                    Ok(e) => return Ok(Encoder { mf: Some(e), soft: None, w, h, fps, soft_started: false }),
+                    Err(e) => {
+                        crate::host::log(&format!("vídeo: Media Foundation no disponible ({e}); se usa OpenH264"));
+                        MF_BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
         Ok(Encoder {
             #[cfg(target_os = "linux")]
             hw: None,
+            #[cfg(windows)]
+            mf: None,
             soft: Some(H264::new(w, h, fps)?),
             w,
             h,
@@ -60,12 +83,16 @@ impl Encoder {
     }
 
     /// Nombre del compresor en uso (para el registro)
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> String {
         #[cfg(target_os = "linux")]
         if let Some(h) = &self.hw {
-            return h.kind().name();
+            return h.kind().name().to_string();
         }
-        "OpenH264 (software)"
+        #[cfg(windows)]
+        if let Some(m) = &self.mf {
+            return m.name().to_string();
+        }
+        "OpenH264 (software)".to_string()
     }
 
     pub fn encode(&mut self, f: &Frame, idr: bool) -> Result<Vec<u8>, String> {
@@ -80,6 +107,17 @@ impl Encoder {
                 }
             }
             self.hw = None;
+        }
+        #[cfg(windows)]
+        if let Some(mf) = self.mf.as_mut() {
+            match mf.encode(f, idr) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    crate::host::log(&format!("vídeo: {} falló ({e}); se pasa a software", mf.name()));
+                    MF_BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            self.mf = None;
         }
         if self.soft.is_none() {
             self.soft = Some(H264::new(self.w, self.h, self.fps)?);

@@ -707,11 +707,15 @@ struct Inp {
 output_names!(Inp);
 ignore_events!(Inp: wl_seat::WlSeat, vpm::ZwlrVirtualPointerManagerV1, vp::ZwlrVirtualPointerV1, vkm::ZwpVirtualKeyboardManagerV1, vk::ZwpVirtualKeyboardV1);
 
-/// Teclado virtual con un mapa XKB propio: cada keysym que llega ocupa su propia tecla
-/// (como hace wtype), así no hace falta libxkbcommon y vale cualquier distribución.
+/// Teclado virtual con un mapa XKB propio (como hace wtype), así no hace falta libxkbcommon
+/// y vale cualquier distribución. Letras, números y teclas especiales van en su código evdev
+/// real: Hyprland traduce los atajos con SU distribución (no con la de este teclado), así que
+/// si la «v» no estuviera en KEY_V, Super+V desde el móvil no haría nada. El resto de keysyms
+/// ocupan códigos libres.
 struct Keys {
     kb: vk::ZwpVirtualKeyboardV1,
-    map: Vec<u32>, // keysym en la posición (código xkb - 9)
+    map: Vec<u32>, // keysym por código evdev - 1 (código xkb = índice + 9); 0 = libre
+    base: Vec<u32>, // el mapa inicial, para volver a él cuando se llena
     mods: u32,
     down: Vec<u32>,
     _fd: Option<OwnedFd>,
@@ -734,19 +738,46 @@ fn mod_of(sym: u32) -> u32 {
     }
 }
 
+/// (keysym, código evdev) de las teclas que deben estar en su sitio
+fn fixed_keys() -> Vec<(u32, u32)> {
+    let mut v: Vec<(u32, u32)> = vec![
+        (0xff1b, 1), (0xff08, 14), (0xff09, 15), (0xff0d, 28), (0x20, 57), (0xffe5, 58),
+        (0xffe1, 42), (0xffe2, 54), (0xffe3, 29), (0xffe4, 97), (0xffe9, 56),
+        (0xfe03, 100), (0xffeb, 125), (0xffec, 126), (0xff67, 127),
+        (0xff50, 102), (0xff52, 103), (0xff55, 104), (0xff51, 105), (0xff53, 106), (0xff57, 107),
+        (0xff54, 108), (0xff56, 109), (0xff63, 110), (0xffff, 111), (0xff8d, 96), (0xff61, 99),
+    ];
+    for (i, c) in "1234567890".chars().enumerate() { v.push((c as u32, 2 + i as u32)); }
+    for (row, first) in [("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44)] {
+        for (i, c) in row.chars().enumerate() { v.push((c as u32, first + i as u32)); }
+    }
+    for i in 0..10 { v.push((0xffbe + i, 59 + i)); } // F1-F10
+    v.push((0xffc8, 87)); // F11
+    v.push((0xffc9, 88)); // F12
+    v
+}
+
 impl Keys {
     fn new(kb: vk::ZwpVirtualKeyboardV1) -> Result<Self, Err> {
-        let mut map: Vec<u32> = vec![
-            0xff08, 0xff09, 0xff0d, 0xff1b, 0xffff, 0xff50, 0xff51, 0xff52, 0xff53, 0xff54, 0xff55, 0xff56, 0xff57,
-            0xff63, 0xff67, 0xff8d, 0xff61, 0xffe1, 0xffe2, 0xffe3, 0xffe4, 0xffe5, 0xffe7, 0xffe9, 0xffea, 0xffeb,
-            0xffec, 0xfe03,
-        ];
-        map.extend(0xffbe..=0xffc9); // F1-F12
-        map.extend(0x20..=0x7e); // ASCII
-        map.extend([0xf1, 0xd1, 0xe1, 0xe9, 0xed, 0xf3, 0xfa, 0xc1, 0xc9, 0xcd, 0xd3, 0xda, 0xfc, 0xdc, 0xbf, 0xa1, 0xba, 0xaa, 0xe7, 0xc7, 0x20ac]);
-        let mut k = Keys { kb, map, mods: 0, down: vec![], _fd: None };
+        let mut map = vec![0u32; 247]; // evdev 1..=247 → xkb 9..=255
+        for (sym, code) in fixed_keys() { map[code as usize - 1] = sym; }
+        // el resto de ASCII y lo típico en español, ya puesto para no recargar el mapa al escribir
+        let extra = (0x20..=0x7e).chain([0xffe7, 0xffea, 0xf1, 0xd1, 0xe1, 0xe9, 0xed, 0xf3, 0xfa, 0xc1,
+            0xc9, 0xcd, 0xd3, 0xda, 0xfc, 0xdc, 0xbf, 0xa1, 0xba, 0xaa, 0xe7, 0xc7, 0x20ac]);
+        for sym in extra {
+            if !map.contains(&sym) {
+                if let Some(slot) = Self::free_slot(&map) { map[slot] = sym; }
+            }
+        }
+        let mut k = Keys { kb, base: map.clone(), map, mods: 0, down: vec![], _fd: None };
         k.upload()?;
         Ok(k)
+    }
+
+    /// hueco libre, empezando por arriba (códigos que ninguna distribución usa para letras)
+    fn free_slot(map: &[u32]) -> Option<usize> {
+        (0..map.len()).rev().find(|i| map[*i] == 0 && *i + 1 > 88)
+            .or_else(|| (0..map.len()).rev().find(|i| map[*i] == 0))
     }
 
     fn upload(&mut self) -> Result<(), Err> {
@@ -756,7 +787,9 @@ impl Keys {
         }
         t += "};\nxkb_types \"pantalla\" { include \"complete\" };\nxkb_compatibility \"pantalla\" { include \"complete\" };\nxkb_symbols \"pantalla\" {\n";
         for (i, s) in self.map.iter().enumerate() {
-            t += &format!(" key <K{}> {{ [ 0x{:x} ] }};\n", i + 9, s);
+            if *s != 0 {
+                t += &format!(" key <K{}> {{ [ 0x{:x} ] }};\n", i + 9, s);
+            }
         }
         for (name, bit) in [("Shift", MOD_SHIFT), ("Control", MOD_CTRL), ("Mod1", MOD_ALT), ("Mod4", MOD_SUPER), ("Mod5", MOD_ALTGR)] {
             let keys: Vec<String> = self.map.iter().enumerate().filter(|(_, s)| mod_of(**s) == bit).map(|(i, _)| format!("<K{}>", i + 9)).collect();
@@ -776,16 +809,23 @@ impl Keys {
     }
 
     fn code(&mut self, sym: u32) -> Result<u32, Err> {
+        if sym == 0 { return Err("keysym 0".into()); }
         if let Some(i) = self.map.iter().position(|s| *s == sym) {
             return Ok(i as u32 + 1); // evdev = xkb - 8 = (i + 9) - 8
         }
-        if self.map.len() >= 246 {
-            // lleno: se quitan los añadidos sobre la marcha (se conservan los fijos)
-            self.map.truncate(150);
-        }
-        self.map.push(sym);
+        let slot = match Self::free_slot(&self.map) {
+            Some(s) => s,
+            None => {
+                // lleno: se quitan los añadidos sobre la marcha (salvo los que están pulsados)
+                let mut m = self.base.clone();
+                for c in &self.down { let i = *c as usize - 1; m[i] = self.map[i]; }
+                self.map = m;
+                Self::free_slot(&self.map).ok_or("teclado virtual lleno")?
+            }
+        };
+        self.map[slot] = sym;
         self.upload()?;
-        Ok(self.map.len() as u32)
+        Ok(slot as u32 + 1)
     }
 
     fn key(&mut self, t: u32, sym: u32, down: bool) -> Result<(), Err> {

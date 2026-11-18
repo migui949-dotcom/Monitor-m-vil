@@ -115,6 +115,15 @@ pub fn is_phone_output(name: &str) -> bool {
     n == "MOVIL" || n.strip_prefix("MOVIL-").map(|r| r.parse::<u8>().is_ok()).unwrap_or(false)
 }
 
+/// Ranura del monitor de móvil `name` (MOVIL → 1, MOVIL-3 → 3), o None si no es de móvil
+pub fn phone_slot(name: &str) -> Option<u8> {
+    if !is_phone_output(name) {
+        return None;
+    }
+    let n = name.strip_prefix("Virtual-").unwrap_or(name);
+    Some(n.strip_prefix("MOVIL-").and_then(|r| r.parse().ok()).unwrap_or(1))
+}
+
 /// Clave de host.conf con la posición del monitor de la ranura `s` (POSITION, POSITION_2…)
 pub fn position_key(s: u8) -> String {
     if s <= 1 { "POSITION".into() } else { format!("POSITION_{s}") }

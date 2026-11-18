@@ -118,6 +118,14 @@ fn main() {
             }
         }
         #[cfg(target_os = "linux")]
+        "escritorio" => {
+            // Super+N de Hyprland (lo reasigna el servicio mientras hay un móvil): con el foco en el
+            // monitor del móvil, N lleva a su escritorio N (11..20 en la 1ª ranura)
+            let accion = args.get(1).map(String::as_str).unwrap_or("workspace");
+            let n = args.get(2).and_then(|v| v.parse::<i64>().ok()).unwrap_or(1);
+            linux::workspace_key(accion, n);
+        }
+        #[cfg(target_os = "linux")]
         "panel" => {
             if let Err(e) = panel::run() {
                 eprintln!("panel: {e}");

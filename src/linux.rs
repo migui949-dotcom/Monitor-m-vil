@@ -157,7 +157,15 @@ fn create_monitor(slot: u8, w: u32, h: u32) -> Result<(), String> {
             ws_rule(&n.to_string(), m, false);
         }
     }
+    // los 10 escritorios del móvil (11..20 en la 1ª ranura): Super+N con el foco en él
+    let base = crate::util::phone_workspace(slot);
     ws_rule(&ws, &out, true);
+    for n in base + 1..base + 10 {
+        ws_rule(&n.to_string(), &out, false);
+    }
+    if !lua {
+        rebind_workspace_keys();
+    }
     focus("monitor", &out);
     focus("workspace", &ws);
     if let Some(p) = prev.filter(|p| !p.is_empty() && !crate::util::is_phone_output(p)) {
@@ -180,7 +188,78 @@ pub fn remove_monitor(slot: u8) {
     }
     if SIZES.lock().unwrap().is_empty() {
         normal_wallpaper();
+        restore_workspace_keys();
     }
+}
+
+// ───────────── Super+N según el monitor con el foco ─────────────
+// Mientras hay un móvil, los atajos `workspace N` / `movetoworkspace N` (N = 1..10) pasan a
+// `pantalla-host escritorio <acción> N`: con el foco en el monitor del móvil van a SU escritorio N
+// (11..20, 21..30…), si no, al N de siempre. Al quitar el último móvil se dejan como estaban.
+
+/// atajos originales: (modificadores, tecla, dispatcher, argumento)
+static SAVED_BINDS: Mutex<Vec<(String, String, String, String)>> = Mutex::new(Vec::new());
+
+fn mods_text(mask: u64) -> String {
+    let names = [(64, "SUPER"), (1, "SHIFT"), (4, "CTRL"), (8, "ALT"), (2, "CAPS"), (16, "MOD2"), (32, "MOD3"), (128, "MOD5")];
+    names.iter().filter(|(b, _)| mask & b != 0).map(|(_, n)| *n).collect::<Vec<_>>().join(" ")
+}
+
+fn rebind_workspace_keys() {
+    let mut saved = SAVED_BINDS.lock().unwrap();
+    if !saved.is_empty() {
+        return; // ya reasignados (otro móvil)
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let exe = exe.to_string_lossy().replace(" (deleted)", "");
+    let Ok(j) = hyprctl(&["binds", "-j"]) else { return };
+    let Ok(binds) = serde_json::from_str::<Vec<serde_json::Value>>(&j) else { return };
+    for b in binds {
+        let disp = b["dispatcher"].as_str().unwrap_or("");
+        let arg = b["arg"].as_str().unwrap_or("").trim();
+        if !matches!(disp, "workspace" | "movetoworkspace" | "movetoworkspacesilent")
+            || !arg.parse::<i64>().map(|n| (1..=10).contains(&n)).unwrap_or(false)
+            || !b["submap"].as_str().unwrap_or("").is_empty()
+            || b["mouse"].as_bool().unwrap_or(false)
+        {
+            continue;
+        }
+        let key = match (b["key"].as_str().unwrap_or(""), b["keycode"].as_u64().unwrap_or(0)) {
+            ("", 0) => continue,
+            ("", c) => format!("code:{c}"),
+            (k, _) => k.to_string(),
+        };
+        let mods = mods_text(b["modmask"].as_u64().unwrap_or(0));
+        let _ = hyprctl(&["keyword", "unbind", &format!("{mods},{key}")]);
+        let _ = hyprctl(&["keyword", "bind", &format!("{mods},{key},exec,{exe} escritorio {disp} {arg}")]);
+        saved.push((mods, key, disp.to_string(), arg.to_string()));
+    }
+}
+
+fn restore_workspace_keys() {
+    let mut saved = SAVED_BINDS.lock().unwrap();
+    for (mods, key, disp, arg) in saved.drain(..) {
+        let _ = hyprctl(&["keyword", "unbind", &format!("{mods},{key}")]);
+        let _ = hyprctl(&["keyword", "bind", &format!("{mods},{key},{disp},{arg}")]);
+    }
+}
+
+/// `pantalla-host escritorio <dispatcher> N`: N relativo al monitor con el foco
+pub fn workspace_key(disp: &str, n: i64) {
+    ensure_env();
+    let disp = match disp {
+        "movetoworkspace" | "movetoworkspacesilent" => disp,
+        _ => "workspace",
+    };
+    let mons = hyprctl(&["monitors", "-j"]).ok()
+        .and_then(|j| serde_json::from_str::<Vec<serde_json::Value>>(&j).ok()).unwrap_or_default();
+    let focused = mons.iter().find(|m| m["focused"].as_bool().unwrap_or(false))
+        .and_then(|m| m["name"].as_str()).unwrap_or("");
+    let target = match crate::util::phone_slot(focused) {
+        Some(s) => crate::util::phone_workspace(s) - 1 + n,
+        None => n,
+    };
+    let _ = hyprctl(&["dispatch", disp, &target.to_string()]);
 }
 
 /// Al arrancar: quita los monitores de móvil que hubieran quedado (cierre brusco)

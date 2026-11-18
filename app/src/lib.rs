@@ -253,10 +253,11 @@ impl App {
                     }
                     continue;
                 }
-                let (x, y) = to_remote(pos);
-                if let Some(action) = self.touch.event(id.0, phase, pos, (x, y)) {
+                if let Some(action) = self.touch.event(id.0, phase, pos, &to_remote) {
                     match action {
                         Gesture::Menu => self.menu = !self.menu,
+                        // soltar la ventana siempre (si no, Super se quedaría pulsada)
+                        g @ Gesture::WinDrop(..) => send_gesture(&link, g),
                         // con el menú abierto los toques son para el menú, no para el escritorio
                         _ if self.menu => {}
                         g => send_gesture(&link, g),
@@ -323,7 +324,7 @@ impl App {
         }
     }
 
-    /// Menú de la app sobre el escritorio (se abre con tres dedos)
+    /// Menú de la app sobre el escritorio (se abre con un toque de tres dedos)
     fn menu_ui(&mut self, ui: &mut egui::Ui, link: &Arc<link::Link>) {
         egui::Area::new(egui::Id::new("menu")).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ui.ctx(), |ui| {
@@ -363,9 +364,18 @@ enum Gesture {
     Release(u16, u16),
     Click(u16, u16),
     RightClick(u16, u16),
-    Scroll(u16, u16, i32),
+    /// rueda en (x, y): pasos verticales y horizontales
+    Scroll(u16, u16, i32, i32),
+    /// dos dedos: coger la ventana (Super + botón izq.) de `desde` y llevarla a `hasta`
+    WinGrab((u16, u16), (u16, u16)),
+    WinMove(u16, u16),
+    WinDrop(u16, u16),
+    /// toque con dos dedos: la ventana bajo los dedos sale del mosaico (Super+V)
+    Float(u16, u16),
     Menu,
 }
+
+const SUPER_L: u32 = 0xffeb;
 
 fn send_gesture(link: &link::Link, g: Gesture) {
     match g {
@@ -374,17 +384,47 @@ fn send_gesture(link: &link::Link, g: Gesture) {
         Gesture::Release(x, y) => rfb::pointer(link, 0, x, y),
         Gesture::Click(x, y) => { rfb::pointer(link, 0, x, y); rfb::pointer(link, 1, x, y); rfb::pointer(link, 0, x, y); }
         Gesture::RightClick(x, y) => { rfb::pointer(link, 0, x, y); rfb::pointer(link, 4, x, y); rfb::pointer(link, 0, x, y); }
-        Gesture::Scroll(x, y, steps) => {
-            // rueda: botón 4 (arriba) o 5 (abajo), un clic por paso
-            let bit = if steps > 0 { 8 } else { 16 };
-            for _ in 0..steps.abs() { rfb::pointer(link, bit, x, y); rfb::pointer(link, 0, x, y); }
+        Gesture::Scroll(x, y, v, h) => {
+            // rueda: botón 4/5 (arriba/abajo) y 6/7 (izq./der.), un clic por paso
+            rfb::pointer(link, 0, x, y);
+            let vb = if v > 0 { 8 } else { 16 };
+            for _ in 0..v.abs() { rfb::pointer(link, vb, x, y); rfb::pointer(link, 0, x, y); }
+            let hb = if h > 0 { 32 } else { 64 };
+            for _ in 0..h.abs() { rfb::pointer(link, hb, x, y); rfb::pointer(link, 0, x, y); }
+        }
+        // como con ratón y teclado: Super + arrastrar mueve la ventana (en mosaico la cambia de sitio)
+        Gesture::WinGrab((x0, y0), (x, y)) => {
+            rfb::pointer(link, 0, x0, y0);
+            rfb::key(link, SUPER_L, true);
+            rfb::pointer(link, 1, x0, y0);
+            rfb::pointer(link, 1, x, y);
+        }
+        Gesture::WinMove(x, y) => rfb::pointer(link, 1, x, y),
+        Gesture::WinDrop(x, y) => { rfb::pointer(link, 0, x, y); rfb::key(link, SUPER_L, false); }
+        Gesture::Float(x, y) => {
+            // el ratón encima la enfoca; Super+V = flotante / de vuelta al mosaico
+            rfb::pointer(link, 0, x, y);
+            rfb::key(link, SUPER_L, true);
+            rfb::key(link, 'v' as u32, true);
+            rfb::key(link, 'v' as u32, false);
+            rfb::key(link, SUPER_L, false);
         }
         Gesture::Menu => {}
     }
 }
 
+/// Dos dedos a la vez: dónde y cuándo empezaron, y si ya se cogió la ventana
+struct Two {
+    t0: std::time::Instant,
+    c0: egui::Pos2,
+    r0: (u16, u16),
+    grabbed: bool,
+    last: (u16, u16),
+}
+
 /// Reconocedor de gestos: tocar = clic, arrastrar = clic mantenido, mantener = clic derecho,
-/// dos dedos = rueda, tres dedos = menú de la app.
+/// dos dedos arrastrando = mover la ventana, toque con dos dedos = ventana flotante,
+/// tres dedos arrastrando = rueda, toque con tres dedos = menú de la app.
 #[derive(Default)]
 struct Touch {
     fingers: HashMap<u64, egui::Pos2>,
@@ -394,51 +434,90 @@ struct Touch {
     moved: bool,
     long_done: bool,
     multi: bool,
-    scroll_acc: f32,
-    scroll_y: Option<f32>,
+    /// cuántos dedos llegó a haber a la vez en este gesto
+    max: usize,
+    two: Option<Two>,
+    three_c0: Option<egui::Pos2>,
+    three_moved: bool,
+    scroll_acc: egui::Vec2,
+    scroll_c: Option<egui::Pos2>,
 }
 
 impl Touch {
-    fn event(&mut self, id: u64, phase: egui::TouchPhase, pos: egui::Pos2, remote: (u16, u16)) -> Option<Gesture> {
+    fn event(&mut self, id: u64, phase: egui::TouchPhase, pos: egui::Pos2, to_remote: &dyn Fn(egui::Pos2) -> (u16, u16)) -> Option<Gesture> {
         use egui::TouchPhase::*;
+        let remote = to_remote(pos);
         match phase {
             Start => {
                 self.fingers.insert(id, pos);
-                match self.fingers.len() {
+                let n = self.fingers.len();
+                self.max = self.max.max(n);
+                match n {
                     1 => {
                         self.start = Some((std::time::Instant::now(), pos, remote));
                         self.last = remote;
                         self.dragging = false; self.moved = false; self.long_done = false; self.multi = false;
+                        self.max = 1; self.two = None; self.three_c0 = None; self.three_moved = false; self.scroll_c = None;
                         return Some(Gesture::Move(remote.0, remote.1));
                     }
                     2 => {
                         self.multi = true;
-                        self.scroll_y = Some(self.centroid().y);
-                        self.scroll_acc = 0.0;
+                        let c = self.centroid();
+                        let r = to_remote(c);
+                        self.two = Some(Two { t0: std::time::Instant::now(), c0: c, r0: r, grabbed: false, last: r });
                         if self.dragging { self.dragging = false; return Some(Gesture::Release(self.last.0, self.last.1)); }
                     }
-                    3 => { self.multi = true; return Some(Gesture::Menu); }
+                    3 => {
+                        self.multi = true;
+                        let c = self.centroid();
+                        self.three_c0 = Some(c);
+                        self.scroll_c = Some(c);
+                        self.scroll_acc = egui::Vec2::ZERO;
+                        // si se estaba moviendo una ventana con dos dedos, se suelta
+                        if let Some(t) = self.two.take() {
+                            if t.grabbed { return Some(Gesture::WinDrop(t.last.0, t.last.1)); }
+                        }
+                    }
                     _ => {}
                 }
                 None
             }
             Move => {
                 self.fingers.insert(id, pos);
-                if self.fingers.len() == 2 {
-                    let y = self.centroid().y;
-                    if let Some(y0) = self.scroll_y {
-                        self.scroll_acc += y - y0;
-                        self.scroll_y = Some(y);
-                        let steps = (self.scroll_acc / 30.0) as i32;
-                        if steps != 0 {
-                            self.scroll_acc -= steps as f32 * 30.0;
-                            // dedos hacia abajo = contenido hacia abajo (rueda arriba), como en el móvil
-                            return Some(Gesture::Scroll(self.last.0, self.last.1, steps));
+                let n = self.fingers.len();
+                if n == 2 && self.max == 2 {
+                    let c = self.centroid();
+                    let r = to_remote(c);
+                    let t = self.two.as_mut()?;
+                    if !t.grabbed {
+                        if (c - t.c0).length() > 12.0 {
+                            t.grabbed = true;
+                            t.last = r;
+                            return Some(Gesture::WinGrab(t.r0, r));
                         }
+                        return None;
+                    }
+                    if r != t.last { t.last = r; return Some(Gesture::WinMove(r.0, r.1)); }
+                    return None;
+                }
+                if n == 3 {
+                    let c = self.centroid();
+                    if let Some(c0) = self.three_c0 { if (c - c0).length() > 12.0 { self.three_moved = true; } }
+                    let prev = self.scroll_c?;
+                    self.scroll_acc += c - prev;
+                    self.scroll_c = Some(c);
+                    let v = (self.scroll_acc.y / 30.0) as i32;
+                    let h = -(self.scroll_acc.x / 30.0) as i32;
+                    if v != 0 || h != 0 {
+                        self.scroll_acc.y -= v as f32 * 30.0;
+                        self.scroll_acc.x += h as f32 * 30.0;
+                        let r = to_remote(c);
+                        // dedos hacia abajo = contenido hacia abajo (rueda arriba), como en el móvil
+                        return Some(Gesture::Scroll(r.0, r.1, v, h));
                     }
                     return None;
                 }
-                if self.multi || self.fingers.len() != 1 { return None; }
+                if self.multi || n != 1 { return None; }
                 let (_, p0, r0) = self.start?;
                 self.last = remote;
                 if !self.moved && (pos - p0).length() > 10.0 { self.moved = true; }
@@ -450,11 +529,30 @@ impl Touch {
             }
             End | Cancel => {
                 self.fingers.remove(&id);
+                // al levantar un dedo se suelta la ventana
+                if self.fingers.len() < 2 {
+                    if let Some(t) = &self.two {
+                        if t.grabbed {
+                            let l = t.last;
+                            self.two = None;
+                            return Some(Gesture::WinDrop(l.0, l.1));
+                        }
+                    }
+                }
                 if !self.fingers.is_empty() { return None; }
-                let was_multi = self.multi;
+                let (was_multi, max) = (self.multi, self.max);
                 self.multi = false;
-                self.scroll_y = None;
+                self.max = 0;
+                self.scroll_c = None;
+                let two = self.two.take();
                 if self.dragging { self.dragging = false; return Some(Gesture::Release(remote.0, remote.1)); }
+                if max == 2 && phase == End {
+                    if let Some(t) = two {
+                        if t.t0.elapsed() < std::time::Duration::from_millis(450) { return Some(Gesture::Float(t.r0.0, t.r0.1)); }
+                    }
+                    return None;
+                }
+                if max == 3 && phase == End && !self.three_moved { return Some(Gesture::Menu); }
                 if was_multi || self.long_done || self.moved { return None; }
                 let (_, _, r0) = self.start.take()?;
                 Some(Gesture::Click(r0.0, r0.1))
@@ -501,7 +599,7 @@ impl eframe::App for App {
                     let events = ui.input(|i| i.events.clone());
                     for ev in events {
                         if let egui::Event::Touch { id, phase, pos, .. } = ev {
-                            match self.touch.event(id.0, phase, pos, (0, 0)) {
+                            match self.touch.event(id.0, phase, pos, &|_| (0, 0)) {
                                 Some(Gesture::Click(..)) => self.standby.next(&sb),
                                 Some(Gesture::Menu) => self.menu = !self.menu,
                                 _ => {}

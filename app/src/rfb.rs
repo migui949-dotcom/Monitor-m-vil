@@ -54,6 +54,13 @@ pub fn pointer(link: &Link, mask: u8, x: u16, y: u16) {
     let _ = link.send(CH_SCREEN, &m);
 }
 
+/// Mensaje KeyEvent: tecla (keysym X11) pulsada o soltada
+pub fn key(link: &Link, keysym: u32, down: bool) {
+    let mut m = vec![4u8, down as u8, 0, 0];
+    m.extend_from_slice(&keysym.to_be_bytes());
+    let _ = link.send(CH_SCREEN, &m);
+}
+
 pub fn run(link: Arc<Link>, rx: Receiver<Vec<u8>>, video: Arc<Video>) -> io::Result<()> {
     let mut r = ChanReader { rx, buf: Vec::new(), pos: 0 };
 

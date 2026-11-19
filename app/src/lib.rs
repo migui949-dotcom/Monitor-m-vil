@@ -59,6 +59,8 @@ struct App {
     kb_manual: bool,
     kb_shown: bool,
     kb_seen_n: u32,
+    /// último toque: durante un rato se sigue repintando a todo ritmo
+    last_input: std::time::Instant,
     /// dónde (y de la pantalla) se tocó por última vez, y dónde se tocó al salir el teclado
     last_tap_y: f32,
     kb_anchor_y: f32,
@@ -119,7 +121,7 @@ impl App {
             android: None,
             keep_on: false,
             data_dir, setup, perms: Perms::default(),
-            kb_manual: false, kb_shown: false, kb_seen_n: 0, last_tap_y: 0.0, kb_anchor_y: 0.0, kb_h_px: -1, kb_h_at: 0,
+            kb_manual: false, kb_shown: false, kb_seen_n: 0, last_input: std::time::Instant::now(), last_tap_y: 0.0, kb_anchor_y: 0.0, kb_h_px: -1, kb_h_at: 0,
         }
     }
 
@@ -298,6 +300,7 @@ impl App {
                 }
             }
             if let egui::Event::Touch { id, phase, pos, .. } = ev {
+                self.last_input = std::time::Instant::now();
                 if phase == egui::TouchPhase::Start && !self.kb_shown { self.last_tap_y = pos.y; }
                 if phase == egui::TouchPhase::Start && btn.contains(pos) { self.btn_touch = Some(id.0); }
                 if self.btn_touch == Some(id.0) {
@@ -330,7 +333,12 @@ impl App {
         // mantener pulsado sin mover → clic derecho
         if let Some(g) = self.touch.tick() { if !self.menu { send_gesture(&link, g); } }
         if self.menu { self.menu_ui(ui, &link); }
-        ui.ctx().request_repaint();
+        // Repintar solo cuando hace falta: cada imagen nueva del equipo ya pide repintado (video.rs).
+        // Con un dedo encima, el menú, el teclado o justo después de tocar → a todo ritmo como antes
+        // (pulsación larga, gestos, respuestas del equipo); en reposo, solo un vistazo de vez en cuando.
+        let busy = self.menu || self.kb_shown || !self.touch.fingers.is_empty()
+            || self.last_input.elapsed() < Duration::from_millis(1500);
+        if busy { ui.ctx().request_repaint(); } else { ui.ctx().request_repaint_after(Duration::from_millis(250)); }
     }
 }
 

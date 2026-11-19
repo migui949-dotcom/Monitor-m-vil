@@ -4,7 +4,7 @@
 //! convierte en EGLImage, se enlaza a una textura externa (OES) y se pinta en un rectángulo.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -123,12 +123,14 @@ pub struct Video {
     dec: Mutex<Option<Decoder>>,
     pub size: Mutex<(i32, i32)>,
     pub frames: Arc<AtomicU64>,
-    pub ctx: Mutex<Option<eframe::egui::Context>>,
+    pub ctx: Arc<Mutex<Option<eframe::egui::Context>>>,
+    /// pts (µs) de la última imagen decodificada; el pintado la compara con la que tiene en pantalla
+    pub last_pts: Arc<AtomicI64>,
 }
 
 impl Video {
     pub fn new() -> Video {
-        Video { med: Arc::new(Medidas::new()), dec: Mutex::new(None), size: Mutex::new((0, 0)), frames: Arc::new(AtomicU64::new(0)), ctx: Mutex::new(None) }
+        Video { med: Arc::new(Medidas::new()), dec: Mutex::new(None), size: Mutex::new((0, 0)), frames: Arc::new(AtomicU64::new(0)), ctx: Arc::new(Mutex::new(None)), last_pts: Arc::new(AtomicI64::new(-1)) }
     }
 
     /// (Re)crea el decodificador para imágenes de w×h
@@ -159,7 +161,7 @@ impl Video {
         // Hilo de salida: cada imagen decodificada se "renderiza" al ImageReader y se pide repintar
         {
             let (codec, stop) = (codec.clone(), stop.clone());
-            let ctx = self.ctx.lock().unwrap().clone();
+            let (ctx, last_pts) = (self.ctx.clone(), self.last_pts.clone());
             let frames = self.frames.clone();
             let med = self.med.clone();
             std::thread::spawn(move || {
@@ -168,10 +170,13 @@ impl Video {
                         Ok(DequeuedOutputBufferInfoResult::Buffer(b)) => {
                             let n = frames.load(Ordering::Relaxed);
                             if n < 3 || n % 300 == 0 { log::info!("decodificada imagen #{n}"); }
-                            med.decodificada(b.info().presentation_time_us());
+                            let pts = b.info().presentation_time_us();
+                            med.decodificada(pts);
                             let _ = codec.0.release_output_buffer(b, true);
                             frames.fetch_add(1, Ordering::Relaxed);
-                            if let Some(c) = &ctx { c.request_repaint(); }
+                            last_pts.store(pts, Ordering::Relaxed);
+                            // la app solo repinta cuando hay algo nuevo: esta imagen lo es
+                            if let Some(c) = ctx.lock().unwrap().as_ref() { c.request_repaint(); }
                         }
                         Ok(_) => {}
                         Err(e) => { log::warn!("salida del códec: {e:?}"); std::thread::sleep(Duration::from_millis(10)); }
@@ -212,6 +217,7 @@ impl Video {
     }
 
     pub fn stop(&self) {
+        self.last_pts.store(-1, Ordering::Relaxed);
         if let Some(d) = self.dec.lock().unwrap().take() {
             d.stop.store(true, Ordering::Relaxed);
         }
@@ -231,6 +237,7 @@ pub struct Renderer {
     vao: glow::VertexArray,
     tex: glow::Texture,
     frame: Option<Frame>,
+    shown_pts: i64,
 }
 // Solo se usa dentro del callback de pintado (hilo de GL); el Mutex que lo envuelve exige Send.
 unsafe impl Send for Renderer {}
@@ -271,7 +278,7 @@ impl Renderer {
             gl.tex_parameter_i32(GL_TEXTURE_EXTERNAL_OES, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
             gl.bind_texture(GL_TEXTURE_EXTERNAL_OES, None);
             log::info!("renderer: creado");
-            Renderer { gl_id, program, vao, tex, frame: None }
+            Renderer { gl_id, program, vao, tex, frame: None, shown_pts: -1 }
         }
     }
 
@@ -290,6 +297,7 @@ impl Renderer {
                 let k = K.fetch_add(1, Ordering::Relaxed);
                 if k < 5 || k % 300 == 0 { log::info!("paint #{k}: acquire = {:?}", acq.as_ref().map(|r| matches!(r, AcquireResult::Image(_)))); }
                 if let Ok(AcquireResult::Image(img)) = acq {
+                    if let Ok(ts) = img.timestamp() { self.shown_pts = ts / 1000; }
                     video.med.pintada(img.timestamp().ok());
                     if let Ok(hb) = img.hardware_buffer() {
                         let dpy = eglGetCurrentDisplay();
@@ -304,6 +312,12 @@ impl Renderer {
                             self.frame = Some(Frame { _image: img, egl, _reader: reader.clone() });
                         }
                     }
+                }
+                // la imagen avisada aún no estaba en el lector (llega un pelín después de
+                // release_output_buffer): volver a pintar enseguida para no quedarse con la anterior
+                let last = video.last_pts.load(Ordering::Relaxed);
+                if last >= 0 && last != self.shown_pts {
+                    if let Some(c) = video.ctx.lock().unwrap().as_ref() { c.request_repaint(); }
                 }
             }
             if self.frame.is_none() { return; }
